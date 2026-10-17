@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -23,4 +23,9 @@ test('validates real Git, file, Node, lock, Qwen, and host-role inputs', () => a
 test('rejects tampered bytes and engine-profile Host attribution', () => {
   const tampered = fixture(); writeFileSync(tampered.manifestPath, '{}'); assert.throws(() => validateCandidateManifest(tampered), /caller-supplied anchor/)
   const wrongRole = fixture(); const manifest = JSON.parse(readFileSync(wrongRole.manifestPath, 'utf8')); manifest.profiles[0].role = 'engine-qualification'; writeFileSync(wrongRole.manifestPath, JSON.stringify(manifest)); wrongRole.expectedManifestSha256 = sha256File(wrongRole.manifestPath); assert.throws(() => validateCandidateManifest(wrongRole), /host profile/)
+})
+test('rejects false Git data, a changed lock, and a missing loaded artifact', () => {
+  const falseGit = fixture(); const manifest = JSON.parse(readFileSync(falseGit.manifestPath, 'utf8')); manifest.candidate.forkCommit = '0'.repeat(40); writeFileSync(falseGit.manifestPath, JSON.stringify(manifest)); falseGit.expectedManifestSha256 = sha256File(falseGit.manifestPath); assert.throws(() => validateCandidateManifest(falseGit), /fork commit/)
+  const changedLock = fixture(); writeFileSync(changedLock.lockPath, 'changed'); assert.throws(() => validateCandidateManifest(changedLock), /lockfile/)
+  const missing = fixture(); const value = JSON.parse(readFileSync(missing.manifestPath, 'utf8')); rmSync(value.runtimeModules[0].path); writeFileSync(missing.manifestPath, JSON.stringify(value)); missing.expectedManifestSha256 = sha256File(missing.manifestPath); assert.throws(() => validateCandidateManifest(missing), /dirty/)
 })
