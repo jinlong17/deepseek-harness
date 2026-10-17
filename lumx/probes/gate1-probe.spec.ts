@@ -4,6 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent, type AgentFactory } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
+import ts from 'typescript'
 import { createLumxLaunchEnvironment } from '../desktop/launch-environment.mjs'
 import { admitLumxByok } from '../identity/byok-admission.mjs'
 import { assertProductPatchBudget, listProductPatches, PATCH_BUDGET } from '../patches/registry.mjs'
@@ -54,7 +55,7 @@ function walk(root: string): string[] {
     const item = statSync(path)
     if (item.isDirectory()) {
       if (name !== 'probes') rows.push(...walk(path))
-    } else if (item.isFile()) {
+    } else if (item.isFile() && !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(name)) {
       rows.push(relative(repository, path))
     }
   }
@@ -72,6 +73,24 @@ function signalFiles(files: readonly string[], expressions: Record<string, RegEx
   }
   return signals
 }
+
+function directImports(source: string): string[] {
+  const parsed = ts.createSourceFile('entry.ts', source, ts.ScriptTarget.Latest, false)
+  return parsed.statements.flatMap(statement =>
+    ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)
+      ? [statement.moduleSpecifier.text] : [])
+}
+
+function directImportMatches(source: string, expression: RegExp): boolean {
+  return directImports(source).some(specifier => expression.test(specifier))
+}
+
+it('does not promote comments or string contents to direct imports', () => {
+  expect(directImports('/*\nimport fake from "./agent-driver.mjs"\n*/\nconst note = "broker"'))
+    .toEqual([])
+  expect(directImports('import actual from "./launch-environment.mjs"'))
+    .toEqual(['./launch-environment.mjs'])
+})
 
 it('runs bounded Gate 1 seam probes and writes one raw capture', async () => {
   const calls: string[] = []
@@ -160,15 +179,16 @@ it('runs bounded Gate 1 seam probes and writes one raw capture', async () => {
         result: admitted.subject === identity.subject ? 'pass' : 'fail',
         evidence: `validated synthetic subject=${admitted.subject}`,
       },
-      lumx_launch_imports: [...lumxLaunch.matchAll(/from\s+['"]([^'"]+)['"]/g)].map(match => match[1]),
-      electron_host_imports_lumx: /from\s+['"][^'"]*lumx/i.test(hostProcess),
-      desktop_host_imports_lumx: /from\s+['"][^'"]*lumx/i.test(desktopHost),
-      launch_imports_agent_driver: /agent|factory|driver/i.test(lumxLaunch),
-      launch_imports_durable_adapter: /durable|persistence/i.test(lumxLaunch),
-      launch_imports_ui_adapter: /render|ui-control/i.test(lumxLaunch),
-      launch_imports_cordis_patch_adapter: /cordis|patch/i.test(lumxLaunch),
-      launch_imports_h1_consumer: /gateway|broker|retry_count|retryCount/i.test(lumxLaunch),
-      launch_imports_host_control: /host-control|control-channel/i.test(lumxLaunch),
+      analysis_kind: 'direct static import specifiers only; keywords are not an import graph',
+      lumx_launch_imports: directImports(lumxLaunch),
+      electron_host_imports_lumx: directImportMatches(hostProcess, /lumx/i),
+      desktop_host_imports_lumx: directImportMatches(desktopHost, /lumx/i),
+      launch_imports_agent_driver: directImportMatches(lumxLaunch, /agent|factory|driver/i),
+      launch_imports_durable_adapter: directImportMatches(lumxLaunch, /durable|persistence/i),
+      launch_imports_ui_adapter: directImportMatches(lumxLaunch, /render|ui-control/i),
+      launch_imports_cordis_patch_adapter: directImportMatches(lumxLaunch, /cordis|patch/i),
+      launch_imports_h1_consumer: directImportMatches(lumxLaunch, /gateway|broker|retry_count|retryCount/i),
+      launch_imports_host_control: directImportMatches(lumxLaunch, /host-control|control-channel/i),
     },
   }
   const output = process.env.A2K_GATE1_PROBE_OUTPUT
