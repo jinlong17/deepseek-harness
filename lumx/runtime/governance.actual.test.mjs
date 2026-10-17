@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+import { installLumxActivationGuards, installLumxGovernance } from './governance.mjs'
 import { launchLumxRuntimeInProcess } from './internal-launch.mjs'
 
 const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
@@ -39,10 +40,15 @@ test('actual candidate composition denies late mutations and shuts down cleanly'
   const entry = [...runtime.ctx.loader.entries()].find(value => value.options.id === target.id)
   assert(entry)
   const group = entry.parent
+  await group.update(group.data.map(row => row.id === target.id
+    ? { ...row, config: { governanceRevision: 1 } }
+    : row))
   const original = entry.options
+  assert.equal(group.data.find(row => row.id === target.id), original)
   await group.update(group.data.map(row => row.id === target.id ? { ...row, disabled: false } : row))
   assert.equal(entry.disabled, true)
   assert.equal(entry.options, original)
+  assert.equal(group.data.find(row => row.id === target.id), original)
   assert.throws(() => group.remove(target.id), /cannot be removed/)
   await assert.rejects(group.create({ name: target.url }), /aliases protected identity/)
   await group.update(group.data.map(row => row.id === target.id ? { ...row, name: 'cordis:timer' } : row))
@@ -53,7 +59,44 @@ test('actual candidate composition denies late mutations and shuts down cleanly'
   ])
   assert.equal(entry.options, original)
   assert.equal(group.data.some(row => row.id === `${target.id}-renamed`), false)
+
+  const containerId = await runtime.ctx.loader.create({ name: 'cordis:group', group: true, config: [] })
+  await runtime.ctx.loader.await()
+  const childGroup = runtime.ctx.loader.resolve(containerId).subgroup
+  assert(childGroup)
+  await childGroup.update([{ id: 'child-protected-alias', name: target.specifier, disabled: true }])
+  const child = runtime.ctx.loader.store['child-protected-alias']
+  assert(child)
+  assert.equal(Object.getPrototypeOf(child.ctx), child.parent.ctx)
+  const childOptions = child.options
+  await childGroup.update([{ ...childOptions, disabled: false }])
+  assert.equal(child.options, childOptions)
+  assert.equal(childGroup.data[0], childOptions)
+  assert.equal(child.disabled, true)
+  assert.equal(child.fiber, undefined)
+  childGroup.remove('child-protected-alias')
+  assert.equal(childGroup.data.length, 0)
+  await childGroup.update([{ id: 'child-protected-alias', name: target.specifier, disabled: true }])
+  assert.equal(childGroup.data[0], runtime.ctx.loader.store['child-protected-alias'].options)
   assert.deepEqual(await runtime.shutdown(), undefined)
+})
+
+test('actual candidate rejects later resolver generation changes before unrelated admission or direct activation', { timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'lumx-governance-generation-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const runtime = await launchLumxRuntimeInProcess(await input(root, ROOT))
+  t.after(runtime.shutdown)
+  const internal = runtime.ctx.loader.internal
+  runtime.ctx.loader.internal = new Proxy(internal, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  await assert.rejects(runtime.ctx.loader.create({ name: 'cordis:timer' }), /resolver identity change/)
+  assert.equal(Object.values(runtime.ctx.loader.store).some(entry => entry.options.name === 'cordis:timer'), false)
+  assert.throws(() => runtime.ctx.plugin(() => {}), /resolver identity change/)
+  await runtime.shutdown()
 })
 
 test('baseline launcher without required setup seam refuses readiness', { timeout: 30_000 }, async t => {
@@ -64,5 +107,56 @@ test('baseline launcher without required setup seam refuses readiness', { timeou
     await assert.rejects(launchLumxRuntimeInProcess(await input(root, BASELINE)), /setup was not invoked/)
   } finally {
     process.exitCode = priorExitCode
+  }
+})
+
+test('actual forbidden package is cache-discovered by non-governed guards and governed preload refusal', { timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'lumx-governance-package-cache-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const runtime = await launchLumxRuntimeInProcess(await input(root, ROOT))
+  t.after(runtime.shutdown)
+  const target = runtime.governance.rows.find(row => row.id === 'product-analytics')
+  assert(target)
+  let networkAttempts = 0
+  const fetch = globalThis.fetch
+  globalThis.fetch = () => {
+    networkAttempts += 1
+    throw new Error('test fixture denies network')
+  }
+  try {
+    const preloadIdentity = runtime.ctx.loader.resolveEntry(target.specifier, runtime.ctx.loader.ctx.baseUrl)
+    assert(preloadIdentity)
+    await runtime.ctx.loader.internal.import(target.specifier, runtime.ctx.loader.ctx.baseUrl, {})
+    const discovered = runtime.ctx.loader.loadedPlugin(preloadIdentity)
+    assert.equal(typeof discovered, 'function')
+    assert.deepEqual(runtime.ctx.loader.identitiesOf(discovered), [target.url])
+
+    const [{ Context }, { default: Loader }] = await Promise.all([
+      import('../../vendor/cordis/lib/index.js'),
+      import('../../vendor/loader/lib/index.js'),
+    ])
+    const nonGoverned = new Context()
+    nonGoverned.baseUrl = runtime.ctx.loader.ctx.baseUrl
+    await nonGoverned.plugin(Loader, { baseUrl: runtime.ctx.loader.ctx.baseUrl }).await()
+    const identity = nonGoverned.loader.resolveEntry(target.specifier, nonGoverned.loader.ctx.baseUrl)
+    assert(identity)
+    const callback = nonGoverned.loader.loadedPlugin(identity)
+    assert.equal(callback, discovered)
+    installLumxActivationGuards(nonGoverned, { urls: [identity] })
+    let allowed = 0
+    await nonGoverned.plugin(() => { allowed += 1 }).await()
+    assert.equal(allowed, 1)
+    assert.throws(() => nonGoverned.plugin(callback), /direct protected callback activation/)
+    assert.equal(networkAttempts, 0)
+
+    const governed = new Context()
+    governed.baseUrl = runtime.ctx.loader.ctx.baseUrl
+    await governed.plugin(Loader, { baseUrl: runtime.ctx.loader.ctx.baseUrl }).await()
+    assert.throws(() => installLumxGovernance(governed), /forbidden module already loaded: product-analytics/)
+    await governed.fiber.dispose()
+    await nonGoverned.fiber.dispose()
+  } finally {
+    globalThis.fetch = fetch
+    await runtime.shutdown()
   }
 })

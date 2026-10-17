@@ -50,7 +50,6 @@ export class Entry {
   public options = {} as EntryOptions
   public subgroup?: EntryGroup
   public subtree?: EntryTree
-
   _initTask?: Promise<void>
 
   constructor(public loader: Loader) {
@@ -151,7 +150,8 @@ export class Entry {
 
   /** Merge new options, restart as needed, and persist through the parent tree. */
   async update(options: Partial<EntryOptions>, create = false, force = false) {
-    const legacy = { ...this.options }
+    const legacyOptions = this.options
+    const legacy = { ...legacyOptions }
     this.preview(options, create)
     try {
       // step 1: update options
@@ -191,7 +191,14 @@ export class Entry {
         await this.init()
       }
     } catch (error) {
-      this.options = legacy as EntryOptions
+      if (create) {
+        this.options = legacyOptions
+      } else {
+        for (const key of Object.keys(legacyOptions)) delete legacyOptions[key]
+        Object.assign(legacyOptions, legacy)
+        sortKeys(legacyOptions)
+        this.options = legacyOptions
+      }
       throw error
     }
   }

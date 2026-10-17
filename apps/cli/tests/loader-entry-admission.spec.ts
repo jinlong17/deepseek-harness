@@ -111,3 +111,84 @@ it('preserves default root and child create, update, remove, and reinstall behav
   expect(calls).toEqual(['r1', 'r2', 'r3'])
   await ctx.fiber.dispose()
 })
+
+it('moves active entries across enabled and disabled groups without splitting context or persistence', async () => {
+  const ctx = new Context()
+  const calls: number[] = []
+  await ctx.plugin(Loader, { baseUrl: import.meta.url }).await()
+  ctx.loader.builtins.group = Group
+  ctx.loader.builtins.allowed = (_ctx: Context, config: { revision: number }) => { calls.push(config.revision) }
+  await ctx.loader.root.update([
+    { id: 'left', name: 'cordis:group', group: true, config: [] },
+    { id: 'blocked', name: 'cordis:group', group: true, disabled: true, config: [] },
+    { id: 'right', name: 'cordis:group', group: true, config: [] },
+  ])
+  await ctx.loader.await()
+  const id = await ctx.loader.create({ name: 'cordis:allowed', config: { revision: 1 } }, 'left')
+  await ctx.loader.await()
+  const entry = ctx.loader.resolve(id)
+  expect(Object.getPrototypeOf(entry.ctx)).toBe(entry.parent.ctx)
+
+  await ctx.loader.update(id, { config: { revision: 2 } }, 'right')
+  await ctx.loader.await()
+  expect(entry.parent).toBe(ctx.loader.resolveGroup('right'))
+  expect(Object.getPrototypeOf(entry.ctx)).toBe(entry.parent.ctx)
+  expect(entry.parent.data[0]).toBe(entry.options)
+  expect(ctx.loader.resolveGroup('left').data).toEqual([])
+
+  await ctx.loader.update(id, { config: { revision: 3 } }, 'blocked')
+  await ctx.loader.await()
+  expect(entry.disabled).toBe(true)
+  expect(Object.getPrototypeOf(entry.ctx)).toBe(entry.parent.ctx)
+  expect(entry.parent.data[0]).toBe(entry.options)
+
+  await ctx.loader.update(id, { config: { revision: 4 } }, 'left')
+  await ctx.loader.await()
+  expect(entry.disabled).toBe(false)
+  expect(entry.fiber?.uid).toBeTruthy()
+  expect(Object.getPrototypeOf(entry.ctx)).toBe(entry.parent.ctx)
+  expect(entry.parent.data[0]).toBe(entry.options)
+  expect(calls).toEqual([1, 2, 4])
+  await ctx.fiber.dispose()
+})
+
+it('rolls back the original persisted row after late denial and accepts a subsequent update', async () => {
+  const ctx = new Context()
+  await ctx.plugin(Loader, { baseUrl: import.meta.url }).await()
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const activated = vi.fn()
+  ctx.loader.builtins.race = (async () => {
+    entered.resolve()
+    await release.promise
+    return activated
+  })()
+  await ctx.loader.root.update([
+    { id: 'race', name: 'cordis:race', disabled: true, config: { revision: 0 } },
+  ])
+  const entry = ctx.loader.store.race
+  const persisted = ctx.loader.root.data[0]
+  let deny = true
+  ctx.on('loader/entry-admit', (candidate, next) => {
+    if (candidate.phase === 'pre-activate' && deny) throw new Error('late denial')
+    next()
+  }, { global: true, prepend: true })
+
+  const pending = ctx.loader.update('race', { disabled: false, config: { revision: 1 } })
+  await entered.promise
+  release.resolve()
+  await expect(pending).rejects.toThrow('late denial')
+  expect(entry.options).toBe(persisted)
+  expect(ctx.loader.root.data[0]).toBe(persisted)
+  expect(persisted).toEqual({ id: 'race', name: 'cordis:race', disabled: true, config: { revision: 0 } })
+  expect(activated).not.toHaveBeenCalled()
+
+  deny = false
+  await ctx.loader.update('race', { disabled: false, config: { revision: 2 } })
+  await ctx.loader.await()
+  expect(entry.options).toBe(persisted)
+  expect(ctx.loader.root.data[0]).toBe(persisted)
+  expect(persisted.config).toEqual({ revision: 2 })
+  expect(activated).toHaveBeenCalledOnce()
+  await ctx.fiber.dispose()
+})

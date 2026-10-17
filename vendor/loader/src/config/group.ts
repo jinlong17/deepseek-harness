@@ -22,16 +22,26 @@ export class EntryGroup {
     const existed = this.tree.store[id]
     const entry: Entry = existed ?? (this.tree.store[id] = new Entry(this.ctx.loader))
     const legacyParent = entry.parent
+    const legacyOptions = entry.options
+    const legacyPrototype = Object.getPrototypeOf(entry.ctx)
     // Entry may be moved from another group,
     // so we need to update the parent reference.
     entry.parent = this
+    Object.setPrototypeOf(entry.ctx, this.ctx)
     // Use `create: true` to replace existing entry.options.
     try {
       await entry.update(options, true, true)
     } catch (error) {
       if (!existed) delete this.tree.store[id]
-      else entry.parent = legacyParent
+      else {
+        entry.parent = legacyParent
+        Object.setPrototypeOf(entry.ctx, legacyPrototype)
+      }
       throw error
+    }
+    if (existed && legacyParent !== this) {
+      legacyParent.unlink(legacyOptions)
+      legacyParent.tree.write()
     }
     return entry.id
   }

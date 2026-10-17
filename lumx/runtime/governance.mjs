@@ -22,6 +22,7 @@ export function installLumxActivationGuards(ctx, options) {
   const isForbiddenCallback = plugin => callbackObject(plugin)
     && (forbiddenCallbacks.has(plugin) || loader.identitiesOf(plugin).some(url => forbiddenUrls.has(url)))
   const check = candidate => {
+    options.validate?.()
     const frozen = candidate.resolution && forbiddenUrls.get(candidate.resolution.url)
     if (!candidate.effectiveDisabled && frozen) {
       if (candidate.resolution.generation !== frozen.generation) reject(candidate.id, 'resolver generation changed')
@@ -33,9 +34,11 @@ export function installLumxActivationGuards(ctx, options) {
   }
   ctx.on('loader/entry-admit', (candidate, next) => { check(candidate); next() }, { global: true, prepend: true })
   ctx.on('internal/plugin', fiber => {
+    options.validate?.()
     if (isForbiddenCallback(fiber.runtime?.callback)) reject(fiber.entry?.id ?? '<direct>', 'direct protected callback activation')
   }, { global: true, prepend: true })
   ctx.on('internal/config', function (config, next) {
+    options.validate?.()
     if (isForbiddenCallback(this.runtime?.callback)) reject(this.entry?.id ?? '<direct>', 'protected callback config')
     return next()
   }, { global: true, prepend: true })
@@ -56,7 +59,19 @@ export function installLumxGovernance(ctx) {
       throw new Error(`LUMX governance found forbidden module already loaded: ${id}`)
     }
   }
-  installLumxActivationGuards(ctx, { urls: [...byId.values()].map(row => row.resolution) })
+  const validateResolver = () => {
+    for (const row of byId.values()) {
+      const current = loader.resolveEntry(row.specifier, loader.ctx.baseUrl)
+      if (!current || current.url !== row.resolution.url || current.format !== row.resolution.format
+        || current.generation !== row.resolution.generation) {
+        throw new Error(`LUMX governance denied resolver identity change for ${row.id}`)
+      }
+    }
+  }
+  installLumxActivationGuards(ctx, {
+    urls: [...byId.values()].map(row => row.resolution),
+    validate: validateResolver,
+  })
   ctx.on('loader/entry-admit', (candidate, next) => {
     const row = byId.get(candidate.id) ?? byId.get(candidate.options.id)
     if (row) {
@@ -75,12 +90,11 @@ export function installLumxGovernance(ctx) {
     rows: Object.freeze([...byId.values()]),
     assertReady() {
       if (byId.size !== Object.keys(ROWS).length) throw new Error('LUMX governance identity set is incomplete')
+      validateResolver()
       for (const row of byId.values()) {
         const entry = [...loader.entries()].find(value => value.options.id === row.id)
-        const current = loader.resolveEntry(row.specifier, loader.ctx.baseUrl)
         if (!entry || !entry.disabled || entry.options.name !== row.specifier
-          || !current || current.url !== row.resolution.url || current.format !== row.resolution.format
-          || current.generation !== row.resolution.generation || loader.loadedPlugin(row.resolution) !== undefined) {
+          || loader.loadedPlugin(row.resolution) !== undefined) {
           throw new Error(`LUMX governance readiness failed: ${row.id}`)
         }
       }

@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import { installLumxActivationGuards, installLumxGovernance, LUMX_GOVERNED_ROWS } from './governance.mjs'
 
@@ -53,8 +57,42 @@ test('freezes all seven identities and blocks root, child, rename, generation, r
   assert.throws(() => dispatch('loader/entry-admit', candidate('alias-callback', { effectiveDisabled: false,
     options: { id: 'alias-callback', name: 'cordis:safe' }, resolution: undefined, plugin: callback })), /callback aliases/)
   assert.throws(() => dispatch('internal/plugin', { runtime: { callback } }), /direct protected callback activation/)
+  const unrelated = () => {}
+  assert.doesNotThrow(() => dispatch('loader/entry-admit', candidate('unrelated', {
+    effectiveDisabled: false,
+    options: { id: 'unrelated', name: 'cordis:safe' },
+    resolution: { builtin: true, generation: 4, url: 'cordis:safe' },
+    plugin: unrelated,
+  })))
+  assert.doesNotThrow(() => dispatch('internal/plugin', { runtime: { callback: unrelated } }))
   loader.resolveEntry = specifier => ({ builtin: false, format: 'module', generation: 5, url: `file:///candidate/${specifier}/lib/index.js` })
-  assert.throws(() => policy.assertReady(), /readiness failed/)
+  assert.throws(() => dispatch('loader/entry-admit', candidate('unrelated-after-generation', {
+    effectiveDisabled: false,
+    options: { id: 'unrelated-after-generation', name: 'cordis:safe' },
+    resolution: { builtin: true, generation: 5, url: 'cordis:safe' },
+  })), /resolver identity change/)
+  assert.throws(() => dispatch('internal/plugin', { runtime: { callback: unrelated } }), /resolver identity change/)
+  assert.throws(() => policy.assertReady(), /resolver identity change/)
+})
+
+test('rejects a same-generation protected resolution change at later admission', () => {
+  const { ctx, dispatch, loader, rows } = fixture()
+  const policy = installLumxGovernance(ctx)
+  for (const row of policy.rows) rows.set(row.id, { disabled: true, options: { id: row.id, name: row.specifier } })
+  const changed = policy.rows[3]
+  loader.resolveEntry = specifier => ({
+    builtin: false,
+    format: 'module',
+    generation: 4,
+    url: specifier === changed.specifier
+      ? 'file:///candidate/replaced/lib/index.js'
+      : `file:///candidate/${specifier}/lib/index.js`,
+  })
+  assert.throws(() => dispatch('loader/entry-admit', {
+    id: 'otherwise-allowed', phase: 'update', effectiveDisabled: false,
+    options: { id: 'otherwise-allowed', name: 'cordis:safe' },
+    resolution: { builtin: true, generation: 4, url: 'cordis:safe' },
+  }), /resolver identity change/)
 })
 
 test('refuses governed readiness for a preloaded namespace', () => {
@@ -73,17 +111,29 @@ test('non-governed declarative fixture installs activation-only guards for a kno
   }))
 })
 
-test('NON-GOVERNED fixture blocks activation of a real preloaded namespace without a readiness rowset', async () => {
-  const [{ Context }, { default: Loader }, namespace] = await Promise.all([
+test('NON-GOVERNED fixture discovers and blocks a real preloaded namespace without a readiness rowset', async t => {
+  const [{ Context }, { default: Loader }] = await Promise.all([
     import('../../vendor/cordis/lib/index.js'),
     import('../../vendor/loader/lib/index.js'),
-    import('../../packages/client/product-analytics/lib/index.js'),
   ])
+  const directory = mkdtempSync(join(tmpdir(), 'lumx-non-governed-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const counter = `__lumx_preloaded_${Math.random().toString(16).slice(2)}`
+  const moduleUrl = pathToFileURL(join(directory, 'plugin.mjs')).href
+  writeFileSync(new URL(moduleUrl), `globalThis.${counter} = (globalThis.${counter} ?? 0) + 1\nexport default () => {}\n`)
   const ctx = new Context()
   ctx.baseUrl = import.meta.url
   await ctx.plugin(Loader, { baseUrl: import.meta.url }).await()
-  const callback = ctx.loader.unwrapExports(namespace)
-  installLumxActivationGuards(ctx, { callbacks: [callback] })
+  const identity = ctx.loader.resolveEntry(moduleUrl, ctx.loader.ctx.baseUrl)
+  assert(identity)
+  await ctx.loader.internal.import(moduleUrl, ctx.loader.ctx.baseUrl, {})
+  assert.equal(globalThis[counter], 1)
+  const callback = ctx.loader.loadedPlugin(identity)
+  assert.equal(typeof callback, 'function')
+  assert.deepEqual(ctx.loader.identitiesOf(callback), [identity.url])
+  installLumxActivationGuards(ctx, { urls: [identity] })
   assert.throws(() => ctx.plugin(callback), /direct protected callback activation/)
+  assert.equal(globalThis[counter], 1)
+  delete globalThis[counter]
   await ctx.fiber.dispose()
 })

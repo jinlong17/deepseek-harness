@@ -101,13 +101,20 @@ export abstract class EntryTree {
     const source = entry.parent
     const target = parent === undefined ? source : this.resolveGroup(parent)
     entry.preview(options, false, target)
-    await entry.update(options, false, true)
+    const legacyPrototype = Object.getPrototypeOf(entry.ctx)
+    entry.parent = target
+    Object.setPrototypeOf(entry.ctx, target.ctx)
+    try {
+      await entry.update(options, false, true)
+    } catch (error) {
+      entry.parent = source
+      Object.setPrototypeOf(entry.ctx, legacyPrototype)
+      throw error
+    }
     if (parent !== undefined) {
-      entry.preview({}, false, target)
       source.unlink(entry.options)
       target.data.splice(position ?? Infinity, 0, entry.options)
       target.tree.write()
-      entry.parent = target
     }
     source.tree.write()
   }
