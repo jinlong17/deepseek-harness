@@ -403,6 +403,18 @@ async function main() {
       message: String(error?.message ?? error).replace(/token=[A-Za-z0-9_-]+/gu, 'token=<redacted>'),
       name: error?.name ?? 'Error',
     }
+    if (!Array.isArray(capture.counted_results)) {
+      const failed = id => ({
+        id, status: 'fail', failure_kind: 'probe_environment',
+        reason: `actual Host probe stopped before qualification completed: ${capture.error.message}`,
+        coverage: 'actual-partial-shared-web-host',
+        subchecks: [{ id: 'actual-host-execution-complete', required: true, result: 'fail', evidence: capture.error }],
+      })
+      capture.counted_results = [
+        failed('real/developer-Host-token-boundary'),
+        failed('real/developer-Host-positive'),
+      ]
+    }
     throw error
   } finally {
     await writeFile(options.output, `${JSON.stringify(capture, null, 2)}\n`)
