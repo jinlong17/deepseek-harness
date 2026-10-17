@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import Loader from '../../../vendor/loader/src/index.ts'
+import Loader, { Group } from '../../../vendor/loader/src/index.ts'
 import { expect, it, vi } from 'vitest'
 
 function plugin(counter: { value: number }) {
@@ -61,5 +61,53 @@ it('rechecks after an asynchronous import before activation', async () => {
   release.resolve()
   await expect(creation).rejects.toThrow('late denial')
   expect(activated).not.toHaveBeenCalled()
+  await ctx.fiber.dispose()
+})
+
+it('rejects an internal-loader generation change across an asynchronous import', async () => {
+  const ctx = new Context()
+  await ctx.plugin(Loader, { baseUrl: import.meta.url }).await()
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const callback = vi.fn()
+  const internal = (generation: number) => ({
+    version: 'v2' as const,
+    loadCache: new Map(),
+    resolveSync: () => ({ format: 'module' as const, url: `file:///generation-${generation}.mjs` }),
+    async import() { entered.resolve(); await release.promise; return callback },
+  })
+  ctx.loader.internal = internal(1) as never
+  const creation = ctx.loader.create({ name: 'generation-race' })
+  await entered.promise
+  ctx.loader.internal = internal(2) as never
+  release.resolve()
+  await expect(creation).rejects.toThrow('changed while importing')
+  expect(callback).not.toHaveBeenCalled()
+  expect(ctx.loader.root.data).toEqual([])
+  expect(Object.keys(ctx.loader.store)).toEqual([])
+  await ctx.fiber.dispose()
+})
+
+it('preserves default root and child create, update, remove, and reinstall behavior', async () => {
+  const ctx = new Context()
+  const calls: string[] = []
+  await ctx.plugin(Loader, { baseUrl: import.meta.url }).await()
+  ctx.loader.builtins.group = Group
+  ctx.loader.builtins.allowed = (_ctx: Context, config: { revision: number }) => { calls.push(`r${config.revision}`) }
+  await ctx.loader.root.update([{ id: 'container', name: 'cordis:group', group: true, config: [
+    { id: 'child', name: 'cordis:allowed', config: { revision: 1 } },
+  ] }])
+  await ctx.loader.await()
+  const group = ctx.loader.resolve('container').subgroup!
+  expect(ctx.loader.store.child?.fiber?.uid).toBeTruthy()
+  await group.update([{ id: 'child-renamed', name: 'cordis:allowed', config: { revision: 2 } }])
+  await ctx.loader.await()
+  expect(Boolean(ctx.loader.store.child)).toBe(false)
+  expect(ctx.loader.store['child-renamed']?.fiber?.uid).toBeTruthy()
+  await group.update([])
+  expect(group.data).toEqual([])
+  await group.update([{ id: 'child-renamed', name: 'cordis:allowed', config: { revision: 3 } }])
+  await ctx.loader.await()
+  expect(calls).toEqual(['r1', 'r2', 'r3'])
   await ctx.fiber.dispose()
 })

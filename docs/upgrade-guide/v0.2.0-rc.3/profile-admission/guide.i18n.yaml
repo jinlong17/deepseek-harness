@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.0-rc.3/profile-admission/guide.md
+/:
+  en: 9dc39a3e8d3cdb04
+  zh: 5c3e5d6d31e6bf2b
+/profile-setup-and-entry-admission:
+  en: 8e9a84b47a972440
+  zh: 85d8875848acdbca
+/profile-setup-and-entry-admission/change:
+  en: b4b4758bd58b8861
+  zh: e0f0664a97c46807
+/profile-setup-and-entry-admission/migration:
+  en: 260ddd7bd41d286a
+  zh: 769bef723ef6bf8a

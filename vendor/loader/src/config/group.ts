@@ -21,6 +21,7 @@ export class EntryGroup {
     const id = this.tree.ensureId(options)
     const existed = this.tree.store[id]
     const entry: Entry = existed ?? (this.tree.store[id] = new Entry(this.ctx.loader))
+    const legacyParent = entry.parent
     // Entry may be moved from another group,
     // so we need to update the parent reference.
     entry.parent = this
@@ -29,6 +30,7 @@ export class EntryGroup {
       await entry.update(options, true, true)
     } catch (error) {
       if (!existed) delete this.tree.store[id]
+      else entry.parent = legacyParent
       throw error
     }
     return entry.id

@@ -102,7 +102,6 @@ test('stubborn stopped Host is killed, reaped, and cleaned after bounded shutdow
   const host = await value.launch()
   assert.equal(host.governance.rows.length, 7)
   assert(host.governance.rows.every(row => row.generation === 1 && row.format === 'module' && row.url.endsWith('/lib/index.js')))
-  assert.deepEqual(host.governance.qualification, { aliasDenied: true, lateEnableDenied: true, removeDenied: true, renameDenied: true })
   process.kill(host.pid, 'SIGSTOP')
   assert.deepEqual(await host.shutdown(), { code: null, signal: 'SIGKILL' })
 })

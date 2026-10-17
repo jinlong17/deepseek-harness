@@ -101,14 +101,15 @@ export abstract class EntryTree {
     const source = entry.parent
     const target = parent === undefined ? source : this.resolveGroup(parent)
     entry.preview(options, false, target)
+    await entry.update(options, false, true)
     if (parent !== undefined) {
+      entry.preview({}, false, target)
       source.unlink(entry.options)
       target.data.splice(position ?? Infinity, 0, entry.options)
       target.tree.write()
       entry.parent = target
     }
     source.tree.write()
-    return entry.update(options, false, true, true)
   }
 
   /** Import a plugin module from a specifier or `cordis:` builtin. */

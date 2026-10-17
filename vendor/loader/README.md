@@ -45,6 +45,16 @@ root.loader.update(id, { config: { enabled: false } })
 | `loader.await()` | Wait for pending entry imports and fiber reloads. |
 | `loader.locate(fiber?)` | Return the loader entry id that owns a fiber. |
 
+### Entry admission
+
+Applications may register the synchronous `loader/entry-admit` waterfall to
+validate a prospective entry before mutation, import, activation, or removal.
+The candidate includes its effective disabled state, qualified id, immutable
+options, same-loader resolution identity, phase, and the imported callback when
+available. A listener rejects by throwing. The loader repeats admission after
+an asynchronous import and rolls rejected creates and persisted updates back.
+With no listener, entry behavior is unchanged.
+
 For file-backed trees, use `@cordisjs/plugin-include`.
 
 ## Volatile configuration

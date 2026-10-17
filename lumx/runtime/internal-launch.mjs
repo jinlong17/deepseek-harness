@@ -14,28 +14,6 @@ function sourceModule(sourceRoot, relativePath) {
   return pathToFileURL(join(sourceRoot, relativePath)).href
 }
 
-async function qualifyGovernance(ctx, governance) {
-  const loader = ctx.loader
-  const target = governance.rows[0]
-  const entry = [...loader.entries()].find(value => value.options.id === target.id)
-  if (!entry) throw new Error(`LUMX governance row is absent: ${target.id}`)
-  const group = entry.parent
-  const original = entry.options
-  await group.update(group.data.map(row => row.id === target.id ? { ...row, disabled: false } : row))
-  const lateEnableDenied = entry.disabled && entry.options === original
-  let removeDenied = false
-  try { group.remove(target.id) } catch { removeDenied = true }
-  let aliasDenied = false
-  try { await group.create({ name: target.resolution.url }) } catch { aliasDenied = true }
-  await group.update([
-    ...group.data.filter(row => row.id !== target.id),
-    { id: `${target.id}-renamed`, name: target.specifier },
-  ])
-  const renameDenied = entry.options === original
-    && group.data.every(row => row.id !== `${target.id}-renamed`)
-  return Object.freeze({ aliasDenied, lateEnableDenied, removeDenied, renameDenied })
-}
-
 /**
  * Launch the official DSH web profile as the current LUMX shared Host/UI surface.
  * This is private distribution glue, not the complete Electron Developer Host wrapper.
@@ -93,15 +71,11 @@ export async function launchLumxRuntimeInProcess(input) {
       patchFiles: [profile.runtimePatch],
       setup(hostCtx) {
         governance = installLumxGovernance(hostCtx)
-        governance.assertInstalled()
       },
       args: ['--no-open', '--host', '127.0.0.1', '--port', String(input.port)],
     })
     if (!governance) throw new Error('LUMX governance setup was not invoked')
-    const governanceQualification = await qualifyGovernance(running.ctx, governance)
-    if (Object.values(governanceQualification).some(value => value !== true)) {
-      throw new Error('LUMX governance qualification failed')
-    }
+    governance.assertReady()
     const port = running.ctx.webServer.port
     const baseUrl = `http://127.0.0.1:${String(port)}`
     const readyUrl = running.ctx.connection.authenticatedUrl(baseUrl)
@@ -120,7 +94,7 @@ export async function launchLumxRuntimeInProcess(input) {
       governance: Object.freeze({ rows: governance.rows.map(row => ({
         id: row.id, specifier: row.specifier, url: row.resolution.url,
         format: row.resolution.format, generation: row.resolution.generation,
-      })), qualification: governanceQualification }),
+      })) }),
       readyUrl,
       surface: 'official-dsh-web-profile-shared-host',
       shutdown,

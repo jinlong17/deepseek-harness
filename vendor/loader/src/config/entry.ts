@@ -150,45 +150,49 @@ export class Entry {
   }
 
   /** Merge new options, restart as needed, and persist through the parent tree. */
-  async update(options: Partial<EntryOptions>, create = false, force = false, admitted = false) {
+  async update(options: Partial<EntryOptions>, create = false, force = false) {
     const legacy = { ...this.options }
-    if (!admitted) this.preview(options, create)
-
-    // step 1: update options
-    if (create) {
-      this.options = options as EntryOptions
-    } else {
-      for (const [key, value] of Object.entries(options)) {
-        if (isNullable(value)) {
-          delete this.options[key]
-        } else {
-          this.options[key] = value
+    this.preview(options, create)
+    try {
+      // step 1: update options
+      if (create) {
+        this.options = options as EntryOptions
+      } else {
+        for (const [key, value] of Object.entries(options)) {
+          if (isNullable(value)) {
+            delete this.options[key]
+          } else {
+            this.options[key] = value
+          }
         }
       }
-    }
-    sortKeys(this.options)
+      sortKeys(this.options)
 
-    // step 2: execute
-    if (this.disabled) {
-      this.fiber?.dispose()
-      return
-    }
+      // step 2: execute
+      if (this.disabled) {
+        this.fiber?.dispose()
+        return
+      }
 
-    // step 3: check if options are changed
-    if (this.fiber?.uid) {
-      const changes = Object.keys({ ...this.options, ...legacy })
-        .filter(key => !deepEqual(this.options[key], legacy[key], key === 'config'))
-      // Only an active fiber in an unchanged context takes volatile-only config changes without a remount.
-      const volatileOnly = changes.length === 1 && changes[0] === 'config'
-        && this.fiber.state === FiberState.ACTIVE && Object.getPrototypeOf(this.ctx) === this.parent.ctx
-        && equalExceptVolatile(legacy.config, this.options.config, this.fiber.runtime?.Config)
-      if (volatileOnly) this.fiber._config = this.options.config
-      const pending = volatileOnly && this._commitVolatile() ? [] : changes
-      if (!pending.length && !force) return
-      this.context.emit('loader/partial-dispose', this, legacy, true)
-      this._patchContext(pending)
-    } else {
-      await this.init()
+      // step 3: check if options are changed
+      if (this.fiber?.uid) {
+        const changes = Object.keys({ ...this.options, ...legacy })
+          .filter(key => !deepEqual(this.options[key], legacy[key], key === 'config'))
+        // Only an active fiber in an unchanged context takes volatile-only config changes without a remount.
+        const volatileOnly = changes.length === 1 && changes[0] === 'config'
+          && this.fiber.state === FiberState.ACTIVE && Object.getPrototypeOf(this.ctx) === this.parent.ctx
+          && equalExceptVolatile(legacy.config, this.options.config, this.fiber.runtime?.Config)
+        if (volatileOnly) this.fiber._config = this.options.config
+        const pending = volatileOnly && this._commitVolatile() ? [] : changes
+        if (!pending.length && !force) return
+        this.context.emit('loader/partial-dispose', this, legacy, true)
+        this._patchContext(pending)
+      } else {
+        await this.init()
+      }
+    } catch (error) {
+      this.options = legacy as EntryOptions
+      throw error
     }
   }
 
