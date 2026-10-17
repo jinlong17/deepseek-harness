@@ -58,23 +58,26 @@ export async function createAcpModelRelay(options) {
   const admit = async (operation) => {
     if (!lifecycle.accepting) throw new Error('LUMX ACP relay is disposed')
     if (!['create', 'resume', 'prompt', 'forward'].includes(operation)) throw new Error('unsupported ACP relay operation')
+    const identity = options.getIdentity()
+    let result
     try {
-      const identity = options.getIdentity()
-      const result = await admitLumxByok({ byokKey: options.providerKey, gateway: options.gateway, identity })
-      const current = options.getIdentity()
-      if (current === undefined || identity === undefined
-        || current.type !== identity.type || current.subject !== identity.subject
-        || current.credential !== identity.credential || current.expiresAt !== identity.expiresAt
-        || Date.parse(current.expiresAt) <= Date.now()) {
-        throw new LumxByokAdmissionError('identity_rejected')
-      }
-      stats.admittedOperations += 1
-      return { operation, subject: result.subject }
+      result = await admitLumxByok({ byokKey: options.providerKey, gateway: options.gateway, identity })
     } catch (error) {
       stats.deniedOperations += 1
       if (error instanceof LumxByokAdmissionError) throw error
       throw new LumxByokAdmissionError('identity_rejected')
     }
+    if (!lifecycle.accepting) throw new Error('LUMX ACP relay is disposed')
+    const current = options.getIdentity()
+    if (current === undefined || identity === undefined
+      || current.type !== identity.type || current.subject !== identity.subject
+      || current.credential !== identity.credential || current.expiresAt !== identity.expiresAt
+      || Date.parse(current.expiresAt) <= Date.now()) {
+      stats.deniedOperations += 1
+      throw new LumxByokAdmissionError('identity_rejected')
+    }
+    stats.admittedOperations += 1
+    return { operation, subject: result.subject }
   }
 
   const server = createServer(async (request, response) => {

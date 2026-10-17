@@ -91,17 +91,20 @@ test('rechecks real-time expiry after barrier-controlled gateway validation', as
   const upstream = await provider(t)
   let release
   const blocked = new Promise(resolve => { release = resolve })
+  let startedResolve
+  const started = new Promise(resolve => { startedResolve = resolve })
   const expiring = { ...identity, expiresAt: new Date(Date.now() + 40).toISOString() }
   const relay = await createAcpModelRelay({
     engineId: 'qwen-0.24.0', getIdentity: () => expiring, launchId: 'launch-expiry', model: 'synthetic-model',
     providerEndpoint: upstream.endpoint, providerKey: 'provider-only-key', sessionId: 'session-expiry',
-    gateway: { validate: async input => { await blocked; return { active: true, expiresAt: future, subject: input.subject } } },
+    gateway: { validate: async input => { startedResolve(); await blocked; return { active: true, expiresAt: future, subject: input.subject } } },
   })
   t.after(() => relay.dispose())
   const pending = fetch(`${relay.endpoint}/chat/completions`, {
     body: JSON.stringify({ model: 'synthetic-model' }),
     headers: { authorization: `Bearer ${relay.capability}`, 'content-type': 'application/json' }, method: 'POST',
   })
+  await started
   await new Promise(resolve => setTimeout(resolve, 60))
   release()
   const response = await pending
@@ -179,6 +182,38 @@ test('disposal aborts active provider I/O and closes the relay listener', async 
   await Promise.race([aborted, new Promise((_, reject) => setTimeout(() => reject(new Error('provider request remained open')), 1_000))])
   assert.ok(await pending instanceof Error)
   await assert.rejects(fetch(`${relay.endpoint}/chat/completions`, { method: 'POST' }))
+})
+
+test('dispose during validation rejects pending admission and causes zero provider I/O', async (t) => {
+  const upstream = await provider(t)
+  let started = 0
+  let allStartedResolve
+  const allStarted = new Promise(resolve => { allStartedResolve = resolve })
+  let release
+  const blocked = new Promise(resolve => { release = resolve })
+  const relay = await createAcpModelRelay({
+    engineId: 'qwen-0.24.0', getIdentity: () => identity, launchId: 'launch-dispose-validation', model: 'synthetic-model',
+    providerEndpoint: upstream.endpoint, providerKey: 'provider-only-key', sessionId: 'session-dispose-validation',
+    gateway: { validate: async input => {
+      started += 1
+      if (started === 2) allStartedResolve()
+      await blocked
+      return { active: true, expiresAt: future, subject: input.subject }
+    } },
+  })
+  const direct = relay.admit('prompt').catch(error => error)
+  const forwarded = fetch(`${relay.endpoint}/chat/completions`, {
+    body: JSON.stringify({ model: 'synthetic-model' }),
+    headers: { authorization: `Bearer ${relay.capability}`, 'content-type': 'application/json' }, method: 'POST',
+  }).catch(error => error)
+  await allStarted
+  const disposal = relay.dispose()
+  release()
+  await disposal
+  assert.match((await direct).message, /disposed/)
+  assert.ok(await forwarded instanceof Error)
+  assert.equal(upstream.requests.length, 0)
+  assert.equal(relay.stats.forwarded, 0)
 })
 
 test('operation admission is explicit and disposal revokes the launch capability', async (t) => {

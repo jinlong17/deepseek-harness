@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 
@@ -199,7 +199,11 @@ export async function runQwenAcpFeasibility(options) {
       credentialRoles: { qwen: 'launch-scoped-relay-capability', provider: 'synthetic-provider-key', hostControl: 'absent-from-engine' },
       lifecycle: { allChildrenExited: attempts.every(attempt => attempt.exit.code !== null || attempt.exit.signal !== null), providerCancelObserved: providerAborted },
       relay: { forwarded: relay.stats.forwarded, providerResponses: relay.stats.providerResponses },
-      settings: { bytes: SETTINGS, sha256: digest(SETTINGS) }, updates: { first: firstUpdates.length, loaded: secondUpdates.length },
+      settings: {
+        input: { bytes: SETTINGS, sha256: digest(SETTINGS) },
+        persisted: { bytes: readFileSync(join(paths.qwenHome, 'settings.json'), 'utf8'), sha256: digest(readFileSync(join(paths.qwenHome, 'settings.json'))) },
+      },
+      updates: { first: firstUpdates.length, loaded: secondUpdates.length },
     }
   } finally {
     identity = undefined
