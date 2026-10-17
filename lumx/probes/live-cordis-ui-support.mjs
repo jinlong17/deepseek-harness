@@ -201,7 +201,8 @@ export async function createBrowserState(options, runtime, acp, cancelBarrier) {
     await page.screenshot({ path: join(dirname(options.output), 'live-cordis-ui-initial-tree.png'), fullPage: true })
     const control = { completed: false }
     try {
-      await page.getByRole('button', { name: 'New Session', exact: true }).click({ timeout: 10_000 })
+      await page.getByRole('button', { name: 'New session', exact: true })
+        .filter({ hasText: 'New Session' }).click({ timeout: 10_000 })
       const input = page.locator('[data-composer-input][contenteditable="true"]').first()
       await input.waitFor({ timeout: 20_000 })
       await input.fill(CANCEL_PROMPT)
