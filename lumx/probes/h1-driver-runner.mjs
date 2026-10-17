@@ -7,7 +7,7 @@ import {
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
-const PINNED_SOURCE = '639ed015397290b3745d163aafe02ffee4aa3f84'
+const EXPECTED_SOURCE_LOCK_SHA256 = '8840a86d7e4b958afd0eafc45db9573c84643c03b51566d91df01d9e0b1da57a'
 const EXPECTED_UNITS = ['real/DSH-non-AgentLoop-driver', 'real/H1-inventory']
 
 /** Lab-only executable: freeze inputs, deny physical networking, and preserve probe evidence. */
@@ -84,21 +84,21 @@ function dirtyPaths(root) {
   return paths
 }
 
-function sourceSnapshot(sourceRoot) {
+function sourceSnapshot(sourceRoot, pinnedCommit) {
   const head = git(sourceRoot, 'rev-parse', 'HEAD')
-  if (head !== PINNED_SOURCE) throw new Error(`source is not pinned at ${PINNED_SOURCE}`)
+  if (head !== pinnedCommit) throw new Error(`source is not pinned at ${pinnedCommit}`)
   const dirty = dirtyPaths(sourceRoot)
   if (dirty.length > 0) throw new Error(`pinned source has tracked/untracked changes: ${dirty.join(', ')}`)
   return { commit: head, tree: git(sourceRoot, 'rev-parse', 'HEAD^{tree}'), dirty }
 }
 
-function artifactSnapshot(options, sourceLock) {
+function artifactSnapshot(options, sourceLock, pinnedCommit) {
   const manifest = JSON.parse(readFileSync(options.artifactManifest, 'utf8'))
   const manifestSha256 = sha256(options.artifactManifest)
   if (manifestSha256 !== sourceLock.dsh.build_artifacts_sha256) {
     throw new Error('build artifact manifest differs from source lock')
   }
-  if (manifest.source_commit !== PINNED_SOURCE) throw new Error('artifact manifest source commit differs from pin')
+  if (manifest.source_commit !== pinnedCommit) throw new Error('artifact manifest source commit differs from pin')
   const digest = createHash('sha256')
   const mismatches = []
   for (const row of manifest.artifacts) {
@@ -117,9 +117,16 @@ function artifactSnapshot(options, sourceLock) {
   }
 }
 
-function provenance(options) {
+function sourceAndRuntimeSnapshot(options) {
+  const sourceLockSha256 = sha256(options.sourceLock)
+  if (sourceLockSha256 !== EXPECTED_SOURCE_LOCK_SHA256) {
+    throw new Error('source lock differs from the reviewed byte anchor')
+  }
   const sourceLock = JSON.parse(readFileSync(options.sourceLock, 'utf8'))
-  if (sourceLock.dsh.commit !== PINNED_SOURCE) throw new Error('source lock differs from pinned source')
+  const pinnedCommit = sourceLock.dsh.commit
+  if (typeof pinnedCommit !== 'string' || !/^[0-9a-f]{40}$/.test(pinnedCommit)) {
+    throw new Error('source lock has an invalid DSH source revision')
+  }
   const lockedNode = sourceLock.runtime.engine_node
   const node = {
     path: options.node,
@@ -131,23 +138,23 @@ function provenance(options) {
     || node.version !== lockedNode.version) {
     throw new Error('Node executable differs from runtime.engine_node lock')
   }
-  const committed = git(options.forkRoot, 'diff', '--name-only', `${PINNED_SOURCE}..HEAD`)
+  const committed = git(options.forkRoot, 'diff', '--name-only', `${pinnedCommit}..HEAD`)
     .split('\n').filter(Boolean)
   const dirty = dirtyPaths(options.forkRoot)
   const outside = [...committed, ...dirty].filter(path => !path.startsWith('lumx/'))
   if (outside.length > 0) throw new Error(`fork change escaped lumx/: ${outside.join(', ')}`)
   return {
-    artifacts: artifactSnapshot(options, sourceLock),
+    artifacts: artifactSnapshot(options, sourceLock, pinnedCommit),
     fork: {
       committed,
       dirty,
       head: git(options.forkRoot, 'rev-parse', 'HEAD'),
       lumxFiles: filesUnder(options.forkRoot, 'lumx'),
-      pinnedAncestor: PINNED_SOURCE,
+      pinnedAncestor: pinnedCommit,
     },
     node,
-    source: sourceSnapshot(options.sourceRoot),
-    sourceLock: { path: options.sourceLock, sha256: sha256(options.sourceLock) },
+    source: sourceSnapshot(options.sourceRoot, pinnedCommit),
+    sourceLock: { path: options.sourceLock, sha256: sourceLockSha256 },
   }
 }
 
@@ -320,10 +327,10 @@ async function main() {
   if (options.output === resolve('')) throw new Error('missing --output')
   if (!options.output.startsWith('/')) throw new Error('--output must be absolute')
   if (existsSync(options.output)) throw new Error(`refusing to overwrite ${options.output}`)
-  const before = provenance(options)
+  const before = sourceAndRuntimeSnapshot(options)
   mkdirSync(options.output, { recursive: false, mode: 0o700 })
   const processResult = await runChild(options, options.output)
-  const after = provenance(options)
+  const after = sourceAndRuntimeSnapshot(options)
   const sourceFrozenDuringRun = JSON.stringify(before.source) === JSON.stringify(after.source)
     && JSON.stringify(before.sourceLock) === JSON.stringify(after.sourceLock)
   const artifactsFrozenDuringRun = JSON.stringify(before.artifacts) === JSON.stringify(after.artifacts)
