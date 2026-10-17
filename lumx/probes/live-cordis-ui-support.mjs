@@ -203,9 +203,16 @@ export async function createBrowserState(options, runtime, acp, cancelBarrier) {
     try {
       await page.getByRole('button', { name: 'New session', exact: true })
         .filter({ hasText: 'New Session' }).click({ timeout: 10_000 })
+      const selectedBlank = page.getByRole('tree', { name: 'Sessions', exact: true })
+        .locator('[role="treeitem"][aria-selected="true"][data-row-key^="session:"]')
+        .filter({ hasText: 'New Session' }).first()
+      await selectedBlank.waitFor({ state: 'visible', timeout: 10_000 })
+      control.preparedSessionId = (await selectedBlank.getAttribute('data-row-key'))?.slice('session:'.length)
       const input = page.locator('[data-composer-input][contenteditable="true"]').first()
       await input.waitFor({ timeout: 20_000 })
       await input.fill(CANCEL_PROMPT)
+      await input.filter({ hasText: CANCEL_PROMPT }).waitFor({ state: 'visible', timeout: 5_000 })
+      control.composerReadback = await input.innerText()
       await input.press('Enter')
       const stop = page.getByRole('button', { name: 'Stop generating' })
       await stop.waitFor({ timeout: 10_000 })
@@ -224,6 +231,7 @@ export async function createBrowserState(options, runtime, acp, cancelBarrier) {
       control.summary = afterCancel.items.find(item => item.sessionId === control.sessionId)
       control.selectedDataRowKey = await selected.getAttribute('data-row-key')
       control.completed = typeof control.sessionId === 'string'
+        && control.preparedSessionId === control.sessionId
         && control.summary?.sessionId === control.sessionId
       await page.screenshot({ path: join(dirname(options.output), 'live-cordis-ui-cancel.png'), fullPage: true })
     } catch (error) {
