@@ -188,6 +188,7 @@ export async function createBrowserState(options, runtime, acp, cancelBarrier) {
       acpResponse: await page.getByText(ACP_RESPONSE, { exact: true }).count(),
     }
     await page.screenshot({ path: join(dirname(options.output), 'live-cordis-ui-initial.png'), fullPage: true })
+    await page.getByRole('button', { name: 'New Session', exact: true }).click({ timeout: 10_000 })
     const input = page.locator('[data-composer-input][contenteditable="true"]').first()
     await input.waitFor({ timeout: 20_000 })
     const listed = await runtime.ctx.sessionController.list({}, AbortSignal.timeout(10_000))
