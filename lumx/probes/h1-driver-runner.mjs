@@ -4,7 +4,7 @@ import {
   closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync,
   realpathSync, readdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
 const PINNED_SOURCE = '639ed015397290b3745d163aafe02ffee4aa3f84'
@@ -193,6 +193,9 @@ function sandboxProfile({ forkRoot, node, runtime, sourceRoot }) {
   lines.push(
     `(allow file-read* (subpath ${sbQuote(runtime)}))`,
     `(allow file-write* (subpath ${sbQuote(runtime)}))`,
+    '(allow network-bind (local tcp4 "localhost:*"))',
+    '(allow network-inbound (local tcp4 "localhost:*"))',
+    '(allow network-outbound (remote tcp4 "localhost:*"))',
   )
   return `${[...new Set(lines)].join('\n')}\n`
 }
@@ -292,6 +295,26 @@ function validateCapture(path) {
   return { capture, qualificationStatus: units.every(row => row.status === 'pass') ? 'pass' : 'fail' }
 }
 
+function attachEvidencePaths(capture, output) {
+  const evidence = [
+    join(output, 'captures', 'h1-driver.json'),
+    join(output, 'stdout.log'),
+    join(output, 'stderr.log'),
+  ]
+  return {
+    ...capture,
+    counted_results: capture.counted_results.map(row => ({
+      ...row,
+      attempt: {
+        evidence,
+        kind: 'actual-runProfile-and-ACP-loopback-isolated',
+        run: basename(output),
+      },
+      evidence,
+    })),
+  }
+}
+
 async function main() {
   const options = argsOf(process.argv.slice(2))
   if (options.output === resolve('')) throw new Error('missing --output')
@@ -310,6 +333,12 @@ async function main() {
   if (processResult.capturePresent) {
     try {
       captureValidation = validateCapture(join(options.output, 'captures', 'h1-driver.json'))
+      captureValidation.capture = attachEvidencePaths(captureValidation.capture, options.output)
+      writeFileSync(
+        join(options.output, 'captures', 'h1-driver.json'),
+        `${JSON.stringify(captureValidation.capture, null, 2)}\n`,
+        { mode: 0o600 },
+      )
     } catch (error) {
       captureError = error instanceof Error ? error.message : String(error)
     }
@@ -323,6 +352,11 @@ async function main() {
     && artifactsFrozenDuringRun
     && forkFrozenDuringRun ? 'pass' : 'fail'
   const qualificationStatus = captureValidation?.qualificationStatus ?? 'fail'
+  const componentProcess = {
+    ...processResult,
+    stderr: 'stderr.log',
+    stdout: 'stdout.log',
+  }
   const receipt = {
     after,
     artifactsFrozenDuringRun,
@@ -330,15 +364,20 @@ async function main() {
     captures: filesUnder(options.output, '.').filter(row => row.path !== 'receipt.json'),
     counted_results: captureValidation?.capture.counted_results ?? [],
     execution: {
-      ...processResult,
+      ...componentProcess,
       expectedCode,
       ...captureError === undefined ? {} : { captureError },
     },
     executionStatus,
     forkFrozenDuringRun,
     generatedAt: new Date().toISOString(),
+    process: componentProcess,
     qualificationStatus,
-    scope: 'actual governed H1 inventory/Broker turn and actual DSH ACP non-AgentLoop capability',
+    rerun: {
+      argv: [process.execPath, ...process.argv.slice(1)],
+      expectedExitCode: qualificationStatus === 'pass' ? 0 : 1,
+    },
+    scope: 'actual governed H1 inventory/model-Gateway/Broker loopback HTTP and actual DSH ACP non-AgentLoop capability',
     sourceFrozenDuringRun,
     status: executionStatus === 'pass' ? qualificationStatus : 'fail',
   }

@@ -25,7 +25,11 @@ export async function launchH1DriverRuntime(input) {
     runtimeId,
     sourceRoot: input.sourceRoot,
   })
-  const observations = installH1DriverRuntime(runtimeId)
+  const observations = installH1DriverRuntime({
+    brokerEndpoint: input.brokerEndpoint,
+    modelEndpoint: input.modelEndpoint,
+    runtimeId,
+  })
   const previous = { cwd: process.cwd(), dshHome: process.env.DSH_HOME }
   process.chdir(input.workspaceDirectory)
   process.env.DSH_HOME = input.dataHomeDirectory
