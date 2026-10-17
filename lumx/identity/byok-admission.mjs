@@ -2,7 +2,7 @@ import { LUMX_DESKTOP_APP_ID } from '../desktop/release-config.mjs'
 
 /** A failed local identity check. No BYOK credential is retained by this seam. */
 export class LumxByokAdmissionError extends Error {
-  /** @param {'identity_required' | 'identity_invalid' | 'identity_expired' | 'identity_rejected'} code */
+  /** @param {'identity_required' | 'identity_expired' | 'identity_rejected'} code */
   constructor(code) {
     super(`LUMX BYOK admission denied: ${code}`)
     this.code = code
@@ -49,8 +49,8 @@ function isWellFormedIdentity(identity) {
     && typeof identity === 'object'
     && identity.type === 'lumx.local-auth.v1'
     && typeof identity.subject === 'string'
-    && identity.subject.length > 0
-    && identity.subject !== 'anonymous'
+    && identity.subject.trim().length > 0
+    && identity.subject.trim().toLowerCase() !== 'anonymous'
     && typeof identity.credential === 'string'
     && identity.credential.length > 0
     && typeof identity.expiresAt === 'string'

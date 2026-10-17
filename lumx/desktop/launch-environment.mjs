@@ -25,7 +25,7 @@ export function resolveLumxLaunchEnvironment(input) {
   }
   const protectedHomeDirectories = [homeDirectory, ...(input.protectedHomeDirectories ?? [])]
     .map(directory => requiredAbsoluteDirectory(directory, 'protectedHomeDirectories'))
-  if (protectedHomeDirectories.some(directory => isInside(workspaceDirectory, directory))) {
+  if (protectedHomeDirectories.some(directory => pathsOverlap(workspaceDirectory, directory))) {
     throw new Error('LUMX workspaceDirectory must be outside every LUMX data home')
   }
 
@@ -82,4 +82,9 @@ function requiredAbsoluteDirectory(directory, field) {
 function isInside(candidate, parent) {
   const path = relative(parent, candidate)
   return path === '' || (!path.startsWith(`..${sep}`) && path !== '..' && !isAbsolute(path))
+}
+
+/** @param {string} first @param {string} second */
+function pathsOverlap(first, second) {
+  return isInside(first, second) || isInside(second, first)
 }

@@ -40,7 +40,7 @@ test('developer launch owns a distinct data home and permits the telemetry switc
   assert.deepEqual(launch.telemetry, { enabled: false, implementation: 'configuration-only' })
 })
 
-test('launch rejects either protected data home, including a child named ..cache', () => {
+test('launch rejects either protected data home in either containment direction', () => {
   assert.throws(() => createLumxLaunchEnvironment({
     mode: 'consumer', osHome: '/synthetic', workspaceDirectory: '/synthetic/.lumx-developer/workspace',
   }), /outside every LUMX data home/)
@@ -50,6 +50,15 @@ test('launch rejects either protected data home, including a child named ..cache
   assert.throws(() => resolveLumxLaunchEnvironment({
     homeDirectory: '/synthetic/.lumx', mode: 'consumer', workspaceDirectory: '/synthetic/.lumx/..cache',
   }), /outside every LUMX data home/)
+  assert.throws(() => createLumxLaunchEnvironment({
+    mode: 'consumer', osHome: '/synthetic/home', workspaceDirectory: '/synthetic/home',
+  }), /outside every LUMX data home/)
+  assert.throws(() => createLumxLaunchEnvironment({
+    mode: 'developer', osHome: '/synthetic/home', workspaceDirectory: '/',
+  }), /outside every LUMX data home/)
+  assert.doesNotThrow(() => createLumxLaunchEnvironment({
+    mode: 'consumer', osHome: '/synthetic/home', workspaceDirectory: '/synthetic/workspace',
+  }))
 })
 
 test('launch rejects invalid telemetry text', () => {
