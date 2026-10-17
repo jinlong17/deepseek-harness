@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
@@ -40,6 +40,40 @@ function launchEnvironment(value = {}) {
   }
   return { ...value }
 }
+function overlaps(first, second) {
+  const inside = (candidate, parent) => {
+    const value = relative(parent, candidate)
+    return value === '' || (value !== '..' && !value.startsWith(`..${sep}`) && !isAbsolute(value))
+  }
+  return inside(first, second) || inside(second, first)
+}
+function dataHomeFor(mode, osHome, workspaceDirectory) {
+  const selectedPath = join(osHome, mode === 'developer' ? '.lumx-developer' : '.lumx')
+  const siblingPath = join(osHome, mode === 'developer' ? '.lumx' : '.lumx-developer')
+  let selected = selectedPath
+  try {
+    const metadata = lstatSync(selectedPath)
+    if (metadata.isSymbolicLink()) throw new Error('selected LUMX data home must not be a symbolic link')
+    if (!metadata.isDirectory()) throw new Error('selected LUMX data home must be a directory')
+    selected = realpathSync(selectedPath)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+    // selectedPath is a direct child of the already-resolved OS home, so its
+    // closest existing parent is the trusted osHome value.
+  }
+  let sibling = siblingPath
+  try {
+    const metadata = lstatSync(siblingPath)
+    if (metadata.isSymbolicLink()) throw new Error('sibling LUMX data home must not be a symbolic link')
+    if (!metadata.isDirectory()) throw new Error('sibling LUMX data home must be a directory')
+    sibling = realpathSync(siblingPath)
+  } catch (error) { if (error?.code !== 'ENOENT') throw error }
+  if (overlaps(selected, sibling)) throw new Error('consumer and developer data homes must remain distinct')
+  if (overlaps(workspaceDirectory, selected) || overlaps(workspaceDirectory, sibling)) {
+    throw new Error('Host workspace must remain outside both LUMX data homes')
+  }
+  return selected
+}
 function processExit(child) { return new Promise(resolveExit => child.once('close', (code, signal) => resolveExit({ code, signal }))) }
 async function withTimeout(promise, ms, label) {
   let timer
@@ -66,7 +100,7 @@ export async function launchLumxHost(input) {
   const forkRoot = realpathSync(input.forkRoot)
   const osHome = realpathSync(input.osHome)
   const workspaceDirectory = realpathSync(input.workspaceDirectory)
-  const dataHome = join(osHome, input.mode === 'developer' ? '.lumx-developer' : '.lumx')
+  const dataHome = dataHomeFor(input.mode, osHome, workspaceDirectory)
   const port = tcpPort(input.port)
   const environment = launchEnvironment(input.environment)
   const model = loopback(input.auth.endpoint, 'model endpoint')

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -61,6 +61,19 @@ test('caller anchors and pre-cancel reject before native process creation', asyn
   const controller = new AbortController(); controller.abort(new Error('cancel-before-launch'))
   await assert.rejects(launchLumxHost({ ...base, nodeSha256: NODE_SHA256, signal: controller.signal }), /cancel-before-launch/)
   assert.deepEqual(readdirSync(root).sort(), ['home', 'workspace'])
+})
+
+test('developer data home cannot alias the sibling consumer home', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'lumx-host-home-alias-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const osHome = join(root, 'home'); const workspaceDirectory = join(root, 'workspace')
+  mkdirSync(osHome); mkdirSync(workspaceDirectory); mkdirSync(join(osHome, '.lumx'))
+  symlinkSync('.lumx', join(osHome, '.lumx-developer'))
+  await assert.rejects(launchLumxHost({
+    forkRoot: FORK, launchId: randomUUID(), mode: 'developer', nodePath: NODE, nodeSha256: NODE_SHA256,
+    osHome, port: 12345, sourceRoot: SOURCE, workspaceDirectory,
+  }), /must not be a symbolic link/)
+  assert.deepEqual(readdirSync(osHome).sort(), ['.lumx', '.lumx-developer'])
 })
 
 test('startup failure, timeout, and cancellation reap the native process and runtime', { timeout: 30_000 }, async t => {
