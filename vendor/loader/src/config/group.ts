@@ -19,12 +19,18 @@ export class EntryGroup {
 
   async create(options: Omit<EntryOptions, 'id'>) {
     const id = this.tree.ensureId(options)
-    const entry: Entry = this.tree.store[id] ??= new Entry(this.ctx.loader)
+    const existed = this.tree.store[id]
+    const entry: Entry = existed ?? (this.tree.store[id] = new Entry(this.ctx.loader))
     // Entry may be moved from another group,
     // so we need to update the parent reference.
     entry.parent = this
     // Use `create: true` to replace existing entry.options.
-    await entry.update(options, true, true)
+    try {
+      await entry.update(options, true, true)
+    } catch (error) {
+      if (!existed) delete this.tree.store[id]
+      throw error
+    }
     return entry.id
   }
 
@@ -37,6 +43,7 @@ export class EntryGroup {
   remove(id: string, isDispose = false) {
     const entry = this.tree.store[id]
     if (!entry) return
+    if (!isDispose) entry.admitRemoval()
     entry.fiber?.dispose()
     if (!isDispose) {
       this.unlink(entry.options)
@@ -47,21 +54,30 @@ export class EntryGroup {
 
   async update(config: EntryOptions[]) {
     const oldConfig = this.data as EntryOptions[]
-    this.data = config
     const oldMap = Object.fromEntries(oldConfig.map(options => [options.id, options]))
     const newMap = Object.fromEntries(config.map(options => [options.id ?? Symbol('anonymous'), options]))
-
-    // update inner plugins
+    const accepted = new Map<string, EntryOptions>()
     const ids = Reflect.ownKeys({ ...oldMap, ...newMap }) as string[]
-    await Promise.all(ids.map(async (id) => {
+    for (const id of ids) {
       if (newMap[id]) {
-        await this.create(newMap[id]).catch((error) => {
+        try {
+          await this.create(newMap[id])
+          accepted.set(id, newMap[id])
+        } catch (error) {
           this.ctx.logger.error(error)
-        })
+          if (oldMap[id]) accepted.set(id, oldMap[id])
+        }
       } else {
-        this.remove(id)
+        try { this.remove(id) } catch (error) {
+          this.ctx.logger.error(error)
+          accepted.set(id, oldMap[id])
+        }
       }
-    }))
+    }
+    this.data = [
+      ...config.flatMap(row => accepted.get(row.id) ? [accepted.get(row.id)!] : []),
+      ...oldConfig.filter(row => accepted.has(row.id) && !newMap[row.id]).map(row => accepted.get(row.id)!),
+    ]
   }
 
   stop() {

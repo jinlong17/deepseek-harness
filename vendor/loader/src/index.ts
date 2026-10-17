@@ -7,6 +7,25 @@ import isolate from './config/isolate.ts'
 import { EntryTree } from './config/tree.ts'
 import { interpolate } from './config/utils.ts'
 
+/** Canonical identity returned by the loader instance that will perform import. */
+export interface LoaderResolvedIdentity {
+  builtin: boolean
+  format?: string
+  generation: number
+  url: string
+}
+
+/** Synchronous admission candidate observed before loader mutations or activation. */
+export interface EntryAdmission {
+  effectiveDisabled: boolean
+  entry: Entry
+  id: string
+  options: Readonly<EntryOptions>
+  phase: 'update' | 'pre-import' | 'pre-activate' | 'remove'
+  plugin?: unknown
+  resolution?: LoaderResolvedIdentity
+}
+
 /** Re-export entry node APIs. */
 export * from './config/entry.ts'
 /** Re-export nested entry group APIs. */
@@ -25,6 +44,8 @@ declare module '@deepseek-ai/cordis' {
     'exit'(signal: NodeJS.Signals): Promise<void>
     'loader/config-update'(): void
     'loader/entry-init'(entry: Entry): void
+    /** Throw synchronously to reject the prospective mutation or activation. */
+    'loader/entry-admit'(candidate: EntryAdmission, next: () => void): void
     'loader/partial-dispose'(entry: Entry, legacy: Partial<EntryOptions>, active: boolean): void
     /**
      * Volatile config values were committed into the running fiber without a remount; dispatched to the owning fiber only.
@@ -83,6 +104,10 @@ export class Loader extends EntryTree {
 
   public name = 'loader'
   public internal = ModuleLoader.fromInternal()
+
+  private resolutionLoader = this.internal
+  private resolutionGeneration = 1
+  private readonly callbackIdentities = new WeakMap<object, Set<string>>()
 
   public builtins: Dict<any> = Object.create(null)
 
@@ -181,6 +206,47 @@ export class Loader extends EntryTree {
   showLog(entry: Entry, type: string) {
     if (entry.options.group || !entry.parent.tree.enableLogs) return
     this.ctx.root.logger?.('loader').info('%s plugin %C', type, entry.options.name)
+  }
+
+  /** Resolve with the same internal loader and parent URL used by `EntryTree.import`. */
+  resolveEntry(name: string, parentURL: string): LoaderResolvedIdentity | undefined {
+    if (name.startsWith('cordis:')) {
+      return { builtin: true, generation: this.resolutionGeneration, url: name }
+    }
+    if (!this.internal) return
+    if (this.internal !== this.resolutionLoader) {
+      this.resolutionLoader = this.internal
+      this.resolutionGeneration += 1
+    }
+    const result = this.internal.version === 'v2'
+      ? this.internal.resolveSync(parentURL, { specifier: name, attributes: {} })
+      : this.internal.resolveSync(name, parentURL, {})
+    return { builtin: false, format: result.format, generation: this.resolutionGeneration, url: result.url }
+  }
+
+  /** Associate an actually imported module identity with its unwrapped callback/export. */
+  rememberIdentity(identity: LoaderResolvedIdentity | undefined, plugin: unknown) {
+    if (!identity || (typeof plugin !== 'object' && typeof plugin !== 'function') || plugin === null) return
+    const key = plugin as object
+    const identities = this.callbackIdentities.get(key) ?? new Set<string>()
+    identities.add(identity.url)
+    this.callbackIdentities.set(key, identities)
+  }
+
+  /** Return identities learned only from this loader's real imports/cache. */
+  identitiesOf(plugin: unknown): readonly string[] {
+    if ((typeof plugin !== 'object' && typeof plugin !== 'function') || plugin === null) return []
+    return [...(this.callbackIdentities.get(plugin as object) ?? [])]
+  }
+
+  /** Inspect an already-evaluated namespace without creating or running a ModuleJob. */
+  loadedPlugin(identity: LoaderResolvedIdentity): unknown {
+    if (!this.internal || identity.builtin) return
+    const namespace = this.internal.loadCache.get(identity.url)?.module?.getNamespace()
+    if (namespace === undefined) return
+    const plugin = this.unwrapExports(namespace)
+    this.rememberIdentity(identity, plugin)
+    return plugin
   }
 
   /** Return the loader entry id that owns `fiber`, if any. */

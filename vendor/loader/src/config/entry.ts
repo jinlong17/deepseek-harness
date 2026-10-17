@@ -1,6 +1,6 @@
 import { Context, Fiber, FiberState, Inject, resolveConfig } from '@deepseek-ai/cordis'
 import { deepEqual, isNullable, updateVolatile, volatileEntries, type Volatile } from '@deepseek-ai/cosmokit'
-import { Loader } from '../index.ts'
+import { Loader, type EntryAdmission, type LoaderResolvedIdentity } from '../index.ts'
 import { EntryGroup } from './group.ts'
 import { EntryTree } from './tree.ts'
 import { evaluate, isJsExpr } from './utils.ts'
@@ -92,6 +92,43 @@ export class Entry {
       : Boolean(options.disabled)
   }
 
+  private effectiveDisabled(options: EntryOptions, parent = this.parent): boolean {
+    if (options.group) return false
+    if (this.disabledOf(options)) return true
+    let owner = parent.ctx.fiber.entry
+    while (owner) {
+      if (this.disabledOf(owner.options)) return true
+      owner = owner.parent.ctx.fiber.entry
+    }
+    return false
+  }
+
+  private admission(phase: EntryAdmission['phase'], options: EntryOptions, resolution?: LoaderResolvedIdentity, plugin?: unknown, parent = this.parent) {
+    const owner = parent.ctx.fiber.entry
+    const id = owner ? owner.id + EntryTree.sep + options.id : options.id
+    const candidate: EntryAdmission = Object.freeze({
+      effectiveDisabled: this.effectiveDisabled(options, parent), entry: this, id,
+      options: Object.freeze({ ...options }), phase, plugin, resolution,
+    })
+    this.context.waterfall('loader/entry-admit', candidate, () => {})
+  }
+
+  /** Synchronously admit the exact prospective row before callers persist or move it. */
+  preview(options: Partial<EntryOptions>, create = false, parent = this.parent) {
+    const prospective = create ? { ...options } as EntryOptions : { ...this.options }
+    if (!create) {
+      for (const [key, value] of Object.entries(options)) {
+        if (isNullable(value)) delete prospective[key as keyof EntryOptions]
+        else prospective[key as keyof EntryOptions] = value as never
+      }
+    }
+    sortKeys(prospective)
+    const resolution = prospective.name === undefined ? undefined
+      : this.loader.resolveEntry(prospective.name, parent.tree.ctx.baseUrl!)
+    this.admission('update', prospective, resolution, undefined, parent)
+    return prospective
+  }
+
   evaluate(expr: string) {
     return evaluate(this.ctx, expr)
   }
@@ -113,8 +150,9 @@ export class Entry {
   }
 
   /** Merge new options, restart as needed, and persist through the parent tree. */
-  async update(options: Partial<EntryOptions>, create = false, force = false) {
+  async update(options: Partial<EntryOptions>, create = false, force = false, admitted = false) {
     const legacy = { ...this.options }
+    if (!admitted) this.preview(options, create)
 
     // step 1: update options
     if (create) {
@@ -219,9 +257,12 @@ export class Entry {
   }
 
   private async _init() {
+    const admitted = { ...this.options }
+    const resolution = this.loader.resolveEntry(admitted.name, this.parent.tree.ctx.baseUrl!)
+    this.admission('pre-import', admitted, resolution)
     let exports: any
     try {
-      exports = await this.parent.tree.import(this.options.name, this.getOuterStack)
+      exports = await this.parent.tree.import(admitted.name, this.getOuterStack)
     } catch (error) {
       this.ctx.logger.error(error)
       return
@@ -229,8 +270,20 @@ export class Entry {
       this._initTask = undefined
     }
     const plugin = this.loader.unwrapExports(exports)
+    const finalResolution = this.loader.resolveEntry(this.options.name, this.parent.tree.ctx.baseUrl!)
+    if (!deepEqual(this.options, admitted, true)
+      || resolution?.generation !== finalResolution?.generation || resolution?.url !== finalResolution?.url) {
+      throw new Error(`loader entry changed while importing ${admitted.name}`)
+    }
+    this.loader.rememberIdentity(finalResolution, plugin)
+    this.admission('pre-activate', this.options, finalResolution, plugin)
     this._patchContext([])
     this.loader.showLog(this, 'apply')
     this.fiber = this.ctx.registry.plugin(plugin, this.options.config, this.getOuterStack).ctx.fiber
+  }
+
+  /** Synchronously admit removal before the owning group mutates persistent state. */
+  admitRemoval() {
+    this.admission('remove', this.options)
   }
 }

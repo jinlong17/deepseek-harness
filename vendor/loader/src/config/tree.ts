@@ -81,9 +81,11 @@ export abstract class EntryTree {
   /** Create an entry in the root group or a nested group. */
   async create(options: Omit<EntryOptions, 'id'>, parent: string | null = null, position = Infinity) {
     const group = this.resolveGroup(parent)
-    group.data.splice(position, 0, options as EntryOptions)
+    const id = await group.create(options)
+    const entry = this.resolve(id)
+    group.data.splice(position, 0, entry.options)
     group.tree.write()
-    return group.create(options)
+    return id
   }
 
   /** Stop and remove an entry from its parent group. */
@@ -97,15 +99,16 @@ export abstract class EntryTree {
   async update(id: string, options: Omit<EntryOptions, 'id' | 'name'>, parent?: string | null, position?: number) {
     const entry = this.resolve(id)
     const source = entry.parent
+    const target = parent === undefined ? source : this.resolveGroup(parent)
+    entry.preview(options, false, target)
     if (parent !== undefined) {
-      const target = this.resolveGroup(parent)
       source.unlink(entry.options)
       target.data.splice(position ?? Infinity, 0, entry.options)
       target.tree.write()
       entry.parent = target
     }
     source.tree.write()
-    return entry.update(options, false, true)
+    return entry.update(options, false, true, true)
   }
 
   /** Import a plugin module from a specifier or `cordis:` builtin. */
