@@ -175,6 +175,8 @@ function sandboxProfile({ browser, forkRoot, node, runtime, sourceRoot }, ports)
     lines.push('(allow mach-lookup)')
     lines.push('(allow ipc-posix-shm)')
     lines.push('(allow ipc-posix-sem)')
+    lines.push(`(allow network-bind network-inbound (local unix-socket (subpath ${sbQuote(runtime)})))`)
+    lines.push(`(allow network-outbound (remote unix-socket (subpath ${sbQuote(runtime)})))`)
     const tempRoots = [dirname(runtime), dirname(runtime).replace(/^\/private/u, '')]
     for (const value of new Set(tempRoots)) {
       const tempRoot = value.replaceAll('\\', '\\\\').replaceAll('.', '\\.')
