@@ -124,17 +124,25 @@ async function connectWorkspace(page, workspace) {
   return { needed: true }
 }
 
-export async function locateDurableSession(page, expected = ACP_RESPONSE) {
+export async function openSessionById(page, sessionId, expected) {
   const tree = page.getByRole('tree', { name: 'Sessions', exact: true })
-  await tree.waitFor({ state: 'visible', timeout: 15_000 })
-  const group = tree.locator('[role="treeitem"][aria-expanded]').filter({ hasText: 'workspace' }).first()
-  await group.waitFor({ state: 'visible', timeout: 15_000 })
-  if (await group.getAttribute('aria-expanded') !== 'true') await group.click({ timeout: 5_000 })
-  const session = tree.getByRole('treeitem').filter({ hasText: ACP_PROMPT }).first()
-  await session.waitFor({ state: 'visible', timeout: 15_000 })
-  await session.click({ timeout: 5_000 })
-  await page.getByText(expected, { exact: true }).first().waitFor({ state: 'visible', timeout: 15_000 })
-  return true
+  try {
+    await tree.waitFor({ state: 'visible', timeout: 15_000 })
+    const group = tree.locator('[role="treeitem"][aria-expanded]').filter({ hasText: 'workspace' }).first()
+    await group.waitFor({ state: 'visible', timeout: 15_000 })
+    if (await group.getAttribute('aria-expanded') !== 'true') await group.click({ timeout: 5_000 })
+    const session = tree.locator(`[data-row-key=${JSON.stringify(`session:${sessionId}`)}]`)
+    await session.waitFor({ state: 'visible', timeout: 15_000 })
+    await session.click({ timeout: 5_000 })
+    await page.getByText(expected, { exact: true }).first().waitFor({ state: 'visible', timeout: 15_000 })
+    return { rendered: true, selected: await session.getAttribute('aria-selected') === 'true' }
+  } catch (error) {
+    const rows = await tree.locator('[role="treeitem"]').evaluateAll(items => items.map(item => ({
+      ariaExpanded: item.getAttribute('aria-expanded'), ariaSelected: item.getAttribute('aria-selected'),
+      dataRowKey: item.getAttribute('data-row-key'), text: item.textContent?.trim().slice(0, 240),
+    }))).catch(() => [])
+    return { error: safeError(error), rendered: false, rows, selected: false }
+  }
 }
 
 export async function createBrowserState(options, runtime, acp, cancelBarrier) {
@@ -182,30 +190,49 @@ export async function createBrowserState(options, runtime, acp, cancelBarrier) {
       onboarding.dismissed = true
     }
     const workspace = await connectWorkspace(page, options.workspace)
-    const durableRendered = await locateDurableSession(page)
+    const listed = await runtime.ctx.sessionController.list({}, AbortSignal.timeout(10_000))
+    const durable = listed.items.find(item => item.sessionId === acp.sessionId)
+    if (durable === undefined) throw new Error('ACP Session identity is absent from shared Web Session Controller')
+    const durableInitial = await openSessionById(page, acp.sessionId, ACP_RESPONSE)
     const initialRender = {
       acpPrompt: await page.getByText(ACP_PROMPT, { exact: true }).count(),
       acpResponse: await page.getByText(ACP_RESPONSE, { exact: true }).count(),
     }
-    await page.screenshot({ path: join(dirname(options.output), 'live-cordis-ui-initial.png'), fullPage: true })
-    await page.getByRole('button', { name: 'New Session', exact: true }).click({ timeout: 10_000 })
-    const input = page.locator('[data-composer-input][contenteditable="true"]').first()
-    await input.waitFor({ timeout: 20_000 })
-    const listed = await runtime.ctx.sessionController.list({}, AbortSignal.timeout(10_000))
-    const durable = listed.items.find(item => item.sessionId === acp.sessionId)
-    if (durable === undefined) throw new Error('ACP Session identity is absent from shared Web Session Controller')
-    await input.fill(CANCEL_PROMPT)
-    await input.press('Enter')
-    const stop = page.getByRole('button', { name: 'Stop generating' })
-    await stop.waitFor({ timeout: 10_000 })
-    await withDeadline('cancel model request arrival', cancelBarrier.arrived, 15_000)
-    await stop.click()
-    await withDeadline('cancel model connection close', cancelBarrier.closed, 15_000)
-    await stop.waitFor({ state: 'detached', timeout: 15_000 })
-    await page.screenshot({ path: join(dirname(options.output), 'live-cordis-ui-cancel.png'), fullPage: true })
+    await page.screenshot({ path: join(dirname(options.output), 'live-cordis-ui-initial-tree.png'), fullPage: true })
+    const control = { completed: false }
+    try {
+      await page.getByRole('button', { name: 'New Session', exact: true }).click({ timeout: 10_000 })
+      const input = page.locator('[data-composer-input][contenteditable="true"]').first()
+      await input.waitFor({ timeout: 20_000 })
+      await input.fill(CANCEL_PROMPT)
+      await input.press('Enter')
+      const stop = page.getByRole('button', { name: 'Stop generating' })
+      await stop.waitFor({ timeout: 10_000 })
+      await withDeadline('cancel model request arrival', cancelBarrier.arrived, 15_000)
+      await stop.click()
+      await withDeadline('cancel model connection close', cancelBarrier.closed, 15_000)
+      await stop.waitFor({ state: 'detached', timeout: 15_000 })
+      const stopped = page.getByText('Stopped', { exact: true }).first()
+      await stopped.waitFor({ state: 'visible', timeout: 10_000 })
+      control.visibleStopped = true
+      const selected = page.getByRole('tree', { name: 'Sessions', exact: true })
+        .locator('[role="treeitem"][aria-selected="true"][data-row-key^="session:"]').first()
+      await selected.waitFor({ state: 'visible', timeout: 10_000 })
+      control.sessionId = (await selected.getAttribute('data-row-key'))?.slice('session:'.length)
+      const afterCancel = await runtime.ctx.sessionController.list({}, AbortSignal.timeout(10_000))
+      control.summary = afterCancel.items.find(item => item.sessionId === control.sessionId)
+      control.selectedDataRowKey = await selected.getAttribute('data-row-key')
+      control.completed = typeof control.sessionId === 'string'
+        && control.summary?.sessionId === control.sessionId
+      await page.screenshot({ path: join(dirname(options.output), 'live-cordis-ui-cancel.png'), fullPage: true })
+    } catch (error) {
+      control.error = safeError(error)
+      await page.screenshot({ path: join(dirname(options.output), 'live-cordis-ui-cancel.png'), fullPage: true })
+        .catch(() => {})
+    }
     return {
-      apiRequests, consoleErrors, context, durable, durableRendered, onboarding, page, pageErrors, workspace,
-      initialRender,
+      apiRequests, consoleErrors, context, control, durable, durableInitial, initialRender,
+      onboarding, page, pageErrors, workspace,
     }
   } catch (error) {
     await context.close().catch(() => {})

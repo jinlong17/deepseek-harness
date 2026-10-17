@@ -269,7 +269,7 @@ function runChild(options, output) {
       mkdirSync(join(output, 'captures'))
       writeFileSync(join(output, 'captures', `${options.suite}.sb`), readFileSync(profile), { mode: 0o600 })
       if (existsSync(capture)) writeFileSync(join(output, 'captures', `${options.suite}.json`), readFileSync(capture), { mode: 0o600 })
-      for (const name of readdirSync(runtime).filter(name => /^live-cordis-ui(?:-(?:onboarding|initial|cancel))?\.png$/u.test(name))) {
+      for (const name of readdirSync(runtime).filter(name => /^live-cordis-ui(?:-(?:onboarding|initial-tree|cancel|restart-control|restart-acp))?\.png$/u.test(name))) {
         writeFileSync(join(output, 'captures', name), readFileSync(join(runtime, name)), { mode: 0o600 })
       }
       const result = {

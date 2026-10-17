@@ -8,7 +8,7 @@ import { dirname, join, resolve } from 'node:path'
 import { createLoopbackIdentityGateway } from '../identity/loopback-gateway.mjs'
 import { launchLumxRuntime } from '../runtime/launch.mjs'
 import {
-  ACP_PROMPT, ACP_RESPONSE, createBrowserState, locateDurableSession, runAcpDurablePrompt,
+  ACP_PROMPT, ACP_RESPONSE, createBrowserState, openSessionById, runAcpDurablePrompt,
 } from './live-cordis-ui-support.mjs'
 
 const PRIVACY_IDS = Object.freeze([
@@ -173,22 +173,31 @@ async function exercisePrivacyLifecycle(runtime) {
   return { actions, final, finalEntries, initial, lateEnable, scopedCandidates }
 }
 
-async function openingSnapshot(ctx, sessionId) {
+async function openingSnapshot(ctx, sessionId, prompt = ACP_PROMPT, response = ACP_RESPONSE) {
   const abort = new AbortController()
   const iterator = ctx.sessionController.follow({ address: { kind: 'session', sessionId } }, abort.signal)[Symbol.asyncIterator]()
   try {
     const first = await iterator.next()
     if (first.done || first.value.type !== 'snapshot') throw new Error('session follow returned no opening snapshot')
     const value = first.value
+    const records = JSON.stringify(value.records)
     return {
       cursor: value.cursor, header: value.header, recordCount: value.records.length,
-      recordsSha256: sha256(JSON.stringify(value.records)),
-      responsePresent: JSON.stringify(value.records).includes(ACP_RESPONSE),
-      promptPresent: JSON.stringify(value.records).includes(ACP_PROMPT),
+      recordsSha256: sha256(records), responsePresent: response === undefined || records.includes(response),
+      promptPresent: records.includes(prompt),
     }
   } finally {
     abort.abort()
     await iterator.return?.()
+  }
+}
+
+async function snapshotOrError(ctx, sessionId, prompt, response) {
+  if (typeof sessionId !== 'string') return { error: { message: 'session identity was not observed' } }
+  try {
+    return await openingSnapshot(ctx, sessionId, prompt, response)
+  } catch (error) {
+    return { error: safeError(error) }
   }
 }
 
@@ -238,6 +247,7 @@ function redactCapture(value) {
 async function execute(options, capture) {
   let identityRequests = 0
   let modelRequests = 0
+  const modelTransactions = []
   let cancelledModelConnections = 0
   let markCancelArrived
   let markCancelClosed
@@ -267,6 +277,10 @@ async function execute(options, capture) {
     const prompt = messageText.includes(CANCEL_PROMPT) ? CANCEL_PROMPT
       : messageText.includes(ACP_PROMPT) ? ACP_PROMPT
         : body.messages.at(-1)?.content?.filter(block => block.type === 'text').map(block => block.text).join('') ?? ''
+    modelTransactions.push({
+      ordinal: modelRequests, promptKind: prompt === CANCEL_PROMPT ? 'control' : prompt === ACP_PROMPT ? 'acp' : 'other',
+      promptSha256: sha256(prompt),
+    })
     if (prompt.includes(CANCEL_PROMPT)) {
       markCancelArrived()
       await new Promise(resolvePending => {
@@ -316,7 +330,8 @@ async function execute(options, capture) {
     const privacy = await exercisePrivacyLifecycle(runtime)
     capture.observations.privacy = { ...privacy, finalEntries: undefined }
     browser = await createBrowserState(options, runtime, acp, cancelBarrier)
-    const beforeRestart = await openingSnapshot(runtime.ctx, browser.durable.sessionId)
+    const durableBefore = await snapshotOrError(runtime.ctx, browser.durable.sessionId, ACP_PROMPT, ACP_RESPONSE)
+    const controlBefore = await snapshotOrError(runtime.ctx, browser.control.sessionId, CANCEL_PROMPT, undefined)
     await runtime.shutdown()
     runtime = undefined
     const afterShutdown = privacy.finalEntries.map(({ entry, id }) => ({
@@ -326,12 +341,33 @@ async function execute(options, capture) {
       mode: 'developer', osHome: options.osHome, workspaceDirectory: options.workspace,
       sourceRoot: options.sourceRoot, port: options.hostPort, auth, environment: {},
     })
-    const afterRestart = await openingSnapshot(restarted.ctx, browser.durable.sessionId)
+    const durableAfter = await snapshotOrError(restarted.ctx, browser.durable.sessionId, ACP_PROMPT, ACP_RESPONSE)
+    const controlAfter = await snapshotOrError(restarted.ctx, browser.control.sessionId, CANCEL_PROMPT, undefined)
+    const restartedList = await restarted.ctx.sessionController.list({}, AbortSignal.timeout(10_000))
+    const durableRestartSummary = restartedList.items.find(item => item.sessionId === browser.durable.sessionId)
+    const controlRestartSummary = restartedList.items.find(item => item.sessionId === browser.control.sessionId)
     await browser.page.goto(restarted.readyUrl, { waitUntil: 'load', timeout: 30_000 })
     await browser.page.locator('[data-slot="root"]').waitFor({ state: 'attached', timeout: 20_000 })
-    const renderedAfterRestart = await locateDurableSession(browser.page, ACP_RESPONSE)
-    const screenshotPath = join(dirname(options.output), 'live-cordis-ui.png')
-    await browser.page.screenshot({ path: screenshotPath, fullPage: true })
+    const controlRestart = typeof browser.control.sessionId === 'string'
+      ? await openSessionById(browser.page, browser.control.sessionId, CANCEL_PROMPT)
+      : { error: { message: 'control session identity was not observed' }, rendered: false, selected: false }
+    if (controlRestart.rendered) {
+      try {
+        await browser.page.getByText('Stopped', { exact: true }).first()
+          .waitFor({ state: 'visible', timeout: 10_000 })
+        controlRestart.visibleStopped = true
+      } catch (error) {
+        controlRestart.error = safeError(error)
+        controlRestart.visibleStopped = false
+      }
+    }
+    await browser.page.screenshot({
+      path: join(dirname(options.output), 'live-cordis-ui-restart-control.png'), fullPage: true,
+    })
+    const durableRestart = await openSessionById(browser.page, browser.durable.sessionId, ACP_RESPONSE)
+    await browser.page.screenshot({
+      path: join(dirname(options.output), 'live-cordis-ui-restart-acp.png'), fullPage: true,
+    })
     const body = await browser.page.locator('body').innerText()
     await browser.context.close()
     browser.context = undefined
@@ -361,12 +397,28 @@ async function execute(options, capture) {
       && (finalRows.get(id)?.fiberPresent === false || finalRows.get(id)?.fiberState === 4))
     const shutdownPass = afterShutdown.length === PRIVACY_IDS.length
       && afterShutdown.every(row => row.fiberPresent === false || row.fiberState === 4)
-    const durablePass = beforeRestart.cursor === afterRestart.cursor
-      && beforeRestart.recordsSha256 === afterRestart.recordsSha256
-      && beforeRestart.promptPresent && beforeRestart.responsePresent
-      && afterRestart.promptPresent && afterRestart.responsePresent
-    const uiCancelPass = browser.apiRequests.includes('/api/session/cancel') && cancelledModelConnections >= 1
-    const uiRenderPass = browser.durableRendered && browser.initialRender.acpResponse > 0 && renderedAfterRestart
+    const durablePass = durableBefore.error === undefined && durableAfter.error === undefined
+      && durableBefore.cursor === durableAfter.cursor
+      && durableBefore.recordsSha256 === durableAfter.recordsSha256
+      && durableBefore.promptPresent && durableBefore.responsePresent
+      && durableAfter.promptPresent && durableAfter.responsePresent
+    const controlCreatedPass = browser.control.completed === true
+      && controlBefore.error === undefined && controlBefore.promptPresent === true
+      && browser.control.summary?.sessionId === browser.control.sessionId
+      && browser.apiRequests.includes('/api/session/create')
+      && browser.apiRequests.includes('/api/session/prompt')
+    const controlTransaction = modelTransactions.find(transaction => transaction.promptKind === 'control')
+    const uiCancelPass = browser.apiRequests.includes('/api/session/cancel')
+      && cancelledModelConnections >= 1 && browser.control.visibleStopped === true
+      && controlTransaction?.promptSha256 === sha256(CANCEL_PROMPT)
+    const controlRestartPass = controlBefore.error === undefined && controlAfter.error === undefined
+      && controlBefore.cursor === controlAfter.cursor
+      && controlBefore.recordsSha256 === controlAfter.recordsSha256
+      && controlAfter.promptPresent === true && controlRestart.rendered === true
+      && controlRestart.selected === true && controlRestart.visibleStopped === true
+      && controlRestartSummary?.sessionId === browser.control.sessionId
+      && browser.control.summary?.running === false
+      && controlRestartSummary?.running === false
     const lateReenableRejected = privacy.lateEnable.executed === true && privacy.lateEnable.rejected === true
       && privacy.lateEnable.restoredDisabled === true
       && (privacy.lateEnable.restoredFiberPresent === false || privacy.lateEnable.restoredFiberState === 4)
@@ -374,7 +426,9 @@ async function execute(options, capture) {
       && (row.fiberPresent === false || row.fiberState === 4))
     const acpJoinPass = acp.observation.phase === 'prompt-complete'
       && browser.durable.sessionId === acp.sessionId
-      && beforeRestart.responsePresent && afterRestart.responsePresent && renderedAfterRestart
+      && durableBefore.responsePresent && durableAfter.responsePresent
+      && durableRestartSummary?.sessionId === acp.sessionId
+      && durableRestart.rendered === true && durableRestart.selected === true
     const checks = [
       check('physical-network-denied', network.denied === true, network),
       check('main-profile-path-denied', isolation.pathDenied === true, isolation),
@@ -384,13 +438,27 @@ async function execute(options, capture) {
       check('privacy-late-reenable-rejected', lateReenableRejected, privacy.lateEnable),
       check('privacy-renamed-absent-uncomposed-inventory', missingIds.length === 0, { missingIds, scopedCandidates: privacy.scopedCandidates }),
       check('privacy-shutdown-no-fiber', shutdownPass, afterShutdown),
-      check('durable-session-controller-restart', durablePass, { beforeRestart, afterRestart }),
-      check('official-ui-created-and-rendered-session', uiRenderPass, { initial: browser.initialRender, renderedAfterRestart }),
+      check('durable-session-controller-restart', durablePass, { beforeRestart: durableBefore, afterRestart: durableAfter }),
+      check('durable-initial-ui-diagnostic', browser.durableInitial.rendered === true
+        && browser.durableInitial.selected === true, {
+        initialRender: browser.initialRender, openById: browser.durableInitial,
+      }, false),
+      check('official-ui-control-session-created', controlCreatedPass, {
+        control: browser.control, beforeRestart: controlBefore,
+      }),
       check('official-ui-cancel-reached-host', uiCancelPass, {
         cancelRequests: browser.apiRequests.filter(path => path === '/api/session/cancel').length,
-        cancelledModelConnections,
+        cancelledModelConnections, controlTransaction,
       }),
-      check('official-ui-reconnected-after-host-restart', renderedAfterRestart, { renderedAfterRestart }),
+      check('official-ui-control-session-restarted', controlRestartPass, {
+        afterRestart: controlAfter, beforeRestart: controlBefore, controlRestart,
+        restartedSummary: controlRestartSummary,
+      }),
+      check('durable-restart-official-ui-same-id', durableRestart.rendered === true
+        && durableRestart.selected === true
+        && durableRestartSummary?.sessionId === browser.durable.sessionId, {
+        controllerSessionId: browser.durable.sessionId, durableRestart, restartedSummary: durableRestartSummary,
+      }),
       check('browser-page-errors-empty', browser.pageErrors.length === 0, browser.pageErrors),
       check('browser-console-errors-observed', true, { count: browser.consoleErrors.length, sha256: sha256(JSON.stringify(browser.consoleErrors)) }, false),
       check('consumer-profile-privacy-consumer', consumerPass, consumerRows),
@@ -402,7 +470,7 @@ async function execute(options, capture) {
       }),
       check('durable-external-acp-identity-join', acpJoinPass, {
         acp: acp.observation, controllerSessionId: browser.durable.sessionId,
-        beforeRestart, afterRestart, renderedAfterRestart,
+        beforeRestart: durableBefore, afterRestart: durableAfter, durableRestart,
       }),
     ]
     const byId = new Map(checks.map(value => [value.id, value]))
@@ -415,11 +483,16 @@ async function execute(options, capture) {
       acp: acp.observation,
       browser: {
         bodyBytes: Buffer.byteLength(body), bodySha256: sha256(body), consoleErrors: browser.consoleErrors,
-        pageErrors: browser.pageErrors, apiRequests: browser.apiRequests,
+        pageErrors: browser.pageErrors, apiRequests: browser.apiRequests, control: browser.control,
+        controlRestart, durableInitial: browser.durableInitial, durableRestart, durableSummary: browser.durable,
       },
       consumerPrivacyRows: consumerRows, governedAdapterEntries,
-      identityRequests, isolation, modelRequests, network, privacy: { ...privacy, finalEntries: undefined },
-      session: { beforeRestart, afterRestart, id: browser.durable.sessionId },
+      identityRequests, isolation, modelRequests, modelTransactions, network,
+      privacy: { ...privacy, finalEntries: undefined },
+      session: {
+        control: { beforeRestart: controlBefore, afterRestart: controlAfter, id: browser.control.sessionId },
+        durable: { beforeRestart: durableBefore, afterRestart: durableAfter, id: browser.durable.sessionId },
+      },
     }
     capture.checks = checks
     capture.counted_results = [
@@ -432,13 +505,13 @@ async function execute(options, capture) {
       'actual Web lifecycle ran, but late rejection or the three-consumer composition contract was not met',
       'actual-developer-and-consumer-shared-web-compositions-plus-governed-adapter-capability-check'),
       result('real/developer-Host-control', [
-        'official-ui-created-and-rendered-session', 'official-ui-cancel-reached-host',
-        'official-ui-reconnected-after-host-restart', 'browser-page-errors-empty',
+        'official-ui-control-session-created', 'official-ui-cancel-reached-host',
+        'official-ui-control-session-restarted', 'browser-page-errors-empty',
       ], 'official UI created, cancelled, and reopened a Session across Host restart',
       'one or more official UI to shared Host create/cancel/restart behaviors failed', 'actual-official-web-ui-shared-host'),
       result('real/durable-UI-mapping', [
-        'durable-session-controller-restart', 'official-ui-created-and-rendered-session',
-        'official-ui-reconnected-after-host-restart', 'durable-external-acp-identity-join',
+        'durable-session-controller-restart', 'durable-initial-ui-diagnostic',
+        'durable-restart-official-ui-same-id', 'durable-external-acp-identity-join',
       ], 'the UI and external ACP adapter joined the same durable Session identity',
       'the actual ACP-created durable Session did not remain joined through SessionController and official UI',
       'actual-acp-child-session-controller-official-web-ui'),
