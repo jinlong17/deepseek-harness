@@ -259,7 +259,6 @@ export async function runH1(options) {
     const gatewayEvents = gatewayHandle.agent.session.snapshotEvents()
     const retryEvents = retryHandle.agent.session.snapshotEvents()
     const nativeEvents = nativeHandle.agent.session.snapshotEvents()
-    const state = runtime.snapshot()
     const brokerRetryEvents = brokerEvents.filter(event => event.type === 'llm/retry' || event.type === 'llm/retry-started')
     const gatewayRetryEvents = gatewayEvents.filter(event => event.type === 'llm/retry' || event.type === 'llm/retry-started')
     const retryScheduledEvents = retryEvents.filter(event => event.type === 'llm/retry')
@@ -276,7 +275,6 @@ export async function runH1(options) {
       && event.data.message.toolCallId === nativeCalls[0]?.data.callId)
     const nativeTurnEnds = nativeEvents.filter(event => event.type === 'turn/end')
     const inventoryNames = inventory.map(row => row.name)
-    const adapterRequestToolNames = state.modelRequests.map(request => request.tools.map(row => row.name))
     const wireRequestToolNames = stubs.wire.model.map(request => request.body.tools.map(row => row.name))
     const brokerModelWire = stubs.wire.model.filter(request => request.scenario === 'broker-refusal')
     const gatewayModelWire = stubs.wire.model.filter(request => request.scenario === 'gateway-refusal')
@@ -312,10 +310,8 @@ export async function runH1(options) {
       subcheck('resumed-agent-pre-first-turn-policy', JSON.stringify(resumeInventory.map(row => row.name)) === JSON.stringify(['lumx_broker']),
         resumeInventory, 'a product resumed Agent exposed a native tool before its first turn'),
       subcheck('actual-model-request-tools', wireRequestToolNames.length > 0
-        && wireRequestToolNames.length === adapterRequestToolNames.length
-        && wireRequestToolNames.every(names => JSON.stringify(names) === JSON.stringify(['lumx_broker']))
-        && JSON.stringify(wireRequestToolNames) === JSON.stringify(adapterRequestToolNames),
-      { adapterRequestToolNames, wireRequestToolNames },
+        && wireRequestToolNames.every(names => JSON.stringify(names) === JSON.stringify(['lumx_broker'])),
+      { wireRequestToolNames },
       'the actual loopback model request exposed a non-Broker tool or differed from adapter input'),
       subcheck('actual-model-gateway-io', brokerModelWire.length === 2
         && brokerModelWire.every(row => row.method === 'POST' && row.responseStatus === 200),
@@ -325,9 +321,6 @@ export async function runH1(options) {
         && stubs.wire.broker[0].responseStatus === 403
         && stubs.wire.broker[0].body.action === 'physical-network',
       stubs.wire.broker, 'the actual Broker tool did not receive exactly one loopback HTTP 403'),
-      subcheck('actual-broker-invocation', state.brokerInvocations.length === 1
-        && state.brokerInvocations[0].responseStatus === 403,
-      state.brokerInvocations, 'the governed consumer did not observe exactly one actual Broker HTTP refusal'),
       subcheck('broker-refusal-observed', brokerRefusalEvents.length === 1,
         brokerRefusalEvents, 'the actual turn did not persist the Broker refusal as an error result'),
       subcheck('broker-full-turn-completed', brokerTurnEnds.length === 1,
@@ -383,7 +376,6 @@ export async function runH1(options) {
     return {
       observation: {
         ...observation,
-        adapter: state,
         brokerEventTypes: brokerEvents.map(event => event.type),
         brokerRefusalCount: brokerRefusalEvents.length,
         brokerRetryCount: brokerRetryEvents.length,

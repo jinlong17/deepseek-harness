@@ -1,9 +1,9 @@
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { installGovernedH1SessionPolicy } from './governed-session-policy.mjs'
-
 const RUNTIMES = new Map()
+const MAX_BODY_BYTES = 64 * 1024
+const REQUEST_DEADLINE_MS = 10_000
 
 function loopbackEndpoint(value, label) {
   const endpoint = new URL(value)
@@ -22,17 +22,53 @@ function snapshotSchemas(tools) {
   }))
 }
 
-async function postJson(endpoint, body, signal) {
+async function readBoundedBody(response, signal) {
+  const advertised = Number(response.headers.get('content-length'))
+  if (Number.isFinite(advertised) && advertised > MAX_BODY_BYTES) {
+    await response.body?.cancel()
+    throw new Error('governed loopback response exceeds local bound')
+  }
+  if (response.body === null) return Buffer.alloc(0)
+  const reader = response.body.getReader()
+  const chunks = []
+  let length = 0
+  try {
+    while (true) {
+      if (signal.aborted) throw signal.reason
+      const { done, value } = await reader.read()
+      if (done) break
+      length += value.byteLength
+      if (length > MAX_BODY_BYTES) {
+        await reader.cancel()
+        throw new Error('governed loopback response exceeds local bound')
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return Buffer.concat(chunks, length)
+}
+
+async function postJson(endpoint, body, callerSignal) {
   const encoded = JSON.stringify(body)
-  if (Buffer.byteLength(encoded) > 64 * 1024) throw new Error('governed H1 request exceeds local loopback bound')
-  const response = await fetch(endpoint, {
-    body: encoded,
-    headers: { 'content-type': 'application/json' },
-    method: 'POST',
-    redirect: 'error',
-    signal,
-  })
-  return response
+  if (Buffer.byteLength(encoded) > MAX_BODY_BYTES) throw new Error('governed H1 request exceeds local loopback bound')
+  const deadline = new AbortController()
+  const timer = setTimeout(() => deadline.abort(new DOMException('governed loopback request deadline exceeded', 'TimeoutError')), REQUEST_DEADLINE_MS)
+  timer.unref?.()
+  const signal = AbortSignal.any([callerSignal, deadline.signal])
+  try {
+    const response = await fetch(endpoint, {
+      body: encoded,
+      headers: { 'content-type': 'application/json' },
+      method: 'POST',
+      redirect: 'error',
+      signal,
+    })
+    return { body: await readBoundedBody(response, signal), ok: response.ok, status: response.status }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /** Install credential-free loopback ports for one product governed-H1 composition. */
@@ -40,17 +76,11 @@ export function installGovernedH1Runtime(input) {
   if (RUNTIMES.has(input.runtimeId)) throw new Error(`governed H1 runtime already installed: ${input.runtimeId}`)
   const state = {
     brokerEndpoint: loopbackEndpoint(input.brokerEndpoint, 'H1 Broker endpoint'),
-    brokerInvocations: [],
     modelEndpoint: loopbackEndpoint(input.modelEndpoint, 'H1 model endpoint'),
-    modelRequests: [],
   }
   RUNTIMES.set(input.runtimeId, state)
   return Object.freeze({
-    assertAgent(agent) { state.sessionPolicy?.assertAgent(agent) },
-    release() { state.sessionPolicy?.dispose(); RUNTIMES.delete(input.runtimeId) },
-    snapshot() {
-      return structuredClone({ brokerInvocations: state.brokerInvocations, modelRequests: state.modelRequests })
-    },
+    release() { RUNTIMES.delete(input.runtimeId) },
   })
 }
 
@@ -77,19 +107,17 @@ export async function apply(ctx, config) {
       return Promise.resolve({ provider, id: model, name: 'H1 controlled', inputModalities: ['text'] })
     }
     async * stream(options) {
-      const request = {
-        model: options.model, ordinal: state.modelRequests.length + 1, provider: options.provider,
-        tools: snapshotSchemas(options.tools ?? []),
-      }
-      state.modelRequests.push(request)
+      const tools = snapshotSchemas(options.tools ?? [])
       const response = await postJson(state.modelEndpoint, {
-        messages: options.messages, model: options.model, provider: options.provider, tools: request.tools,
+        messages: options.messages, model: options.model, provider: options.provider, tools,
       }, options.signal)
       if (!response.ok) {
         throw new llm.LlmError(`LUMX governed H1 model rejected the request (${String(response.status)})`,
           response.status >= 500 ? 'SERVER' : 'UNKNOWN')
       }
-      const reply = await response.json()
+      let reply
+      try { reply = JSON.parse(response.body.toString('utf8')) }
+      catch { throw new Error('LUMX governed H1 model returned invalid JSON') }
       if (reply?.type === 'tool-call' && typeof reply.id === 'string'
         && typeof reply.name === 'string' && reply.arguments !== null && typeof reply.arguments === 'object') {
         const callId = llm.ToolCallId(reply.id); const argumentsJson = JSON.stringify(reply.arguments)
@@ -118,17 +146,10 @@ export async function apply(ctx, config) {
     parameters: { action: { type: 'string', required: true, enum: ['physical-network'], description: 'Governed capability request.' } },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     async execute(args, execution) {
-      const invocation = { action: args.action, ordinal: state.brokerInvocations.length + 1 }
-      state.brokerInvocations.push(invocation)
       const response = await postJson(state.brokerEndpoint, { action: args.action }, execution.signal)
-      const responseBody = await response.text()
-      if (Buffer.byteLength(responseBody) > 64 * 1024) throw new Error('governed Broker response exceeds local loopback bound')
-      invocation.responseStatus = response.status
+      const responseBody = response.body.toString('utf8')
       if (!response.ok) throw new Error(`LUMX Broker refused governed capability (${String(response.status)}): ${responseBody}`)
       return responseBody
     },
   })
-  // Adapter registration is a profile entry, so this runs before boot releases
-  // any configured root/child/resume path to its first request.
-  state.sessionPolicy = installGovernedH1SessionPolicy(ctx)
 }

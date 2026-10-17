@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { createGovernedH1Profile } from '../profiles/governed-h1-profile.mjs'
+import { installGovernedH1Composition } from './governed-h1-composition.mjs'
 import { installGovernedH1Runtime } from './governed-h1-adapter.mjs'
-import { installLumxGovernance } from './governance.mjs'
 
 let active = false
 
@@ -29,7 +29,7 @@ export async function launchH1DriverRuntime(input) {
   if (active) throw new Error('only one H1 driver runtime may own process launch state')
   active = true
   let observations
-  let governance
+  let composition
   let previous
   let cleaned = false
   let running
@@ -74,11 +74,11 @@ export async function launchH1DriverRuntime(input) {
       profile: 'lumx-governed-h1',
       resolvedProfile: { profile: resolvedProfile, installAnchor: profile.installAnchor },
       patchFiles: [profile.runtimePatch],
-      setup(hostCtx) { governance = installLumxGovernance(hostCtx) },
+      setup(hostCtx) { composition = installGovernedH1Composition(hostCtx) },
       args: [],
     })
-    if (governance === undefined) throw new Error('governed H1 governance setup was not invoked')
-    governance.assertReady()
+    if (composition === undefined) throw new Error('governed H1 product composition setup was not invoked')
+    composition.assertReady()
     let stopped
     const shutdown = () => stopped ??= (async () => {
       try { await running.shutdown.shutdown(0) } finally {
@@ -94,8 +94,7 @@ export async function launchH1DriverRuntime(input) {
         privacyRows: [...profile.privacyRows],
       },
       shutdown,
-      snapshot: observations.snapshot,
-      assertAgent: observations.assertAgent,
+      assertAgent: composition.assertAgent,
     })
   } catch (error) {
     try { await running?.shutdown.shutdown(1) } catch {}

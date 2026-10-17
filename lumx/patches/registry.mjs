@@ -71,19 +71,21 @@ export const PRODUCT_PATCHES = Object.freeze([
   Object.freeze({
     files: Object.freeze([
       'lumx/profiles/governed-h1-profile.mjs', 'lumx/probes/h1-driver-probe.mjs',
-      'lumx/runtime/governed-h1-adapter.mjs', 'lumx/runtime/governed-session-policy.mjs',
+      'lumx/runtime/governed-h1-adapter.mjs', 'lumx/runtime/governed-h1-composition.mjs',
+      'lumx/runtime/governed-session-policy.mjs',
       'lumx/runtime/h1-driver-runtime.mjs', 'lumx/runtime/internal-launch.mjs', 'lumx/runtime/profile.mjs',
     ]),
     id: 'G9-1-P7',
-    purpose: 'Governed desktop platform-stub, desktop BYOK, and H1 product compositions with one root-lifetime privacy policy, Broker-only model tools, and monotonic native execution denial.',
+    purpose: 'Governed desktop platform-stub, desktop BYOK, and H1 product compositions with root-owned lifetime policy, Broker-only model tools, bounded loopback I/O, and monotonic native execution denial.',
     removal: 'Remove the governed profiles, H1 adapter/session policy, product composition wiring, and this registry entry together; P6 remains only as an unavailable policy seam without a consumer.',
     removalPaths: Object.freeze([
       'lumx/profiles/governed-h1-profile.mjs', 'lumx/runtime/governed-h1-adapter.mjs',
-      'lumx/runtime/governed-session-policy.mjs', 'lumx/runtime/h1-driver-runtime.mjs',
+      'lumx/runtime/governed-h1-composition.mjs', 'lumx/runtime/governed-session-policy.mjs',
+      'lumx/runtime/h1-driver-runtime.mjs',
       'lumx/patches/registry.mjs',
     ]),
     tests: Object.freeze([
-      'node --test lumx/runtime/governed-h1-adapter.test.mjs lumx/runtime/profile.test.mjs',
+      'node --test lumx/runtime/governed-h1-adapter.test.mjs lumx/runtime/governed-h1-lifecycle.test.mjs lumx/runtime/profile.test.mjs',
       'node lumx/probes/h1-driver-runner.mjs <caller-anchored arguments>',
     ]),
     upstream: 'No upstream patch: P7 consumes P4/P5 setup/admission through the LUMX product boundary.',
