@@ -22,11 +22,15 @@ function argsOf(argv) {
     if (!Number.isSafeInteger(value) || value < 1024 || value > 65535) throw new Error(`invalid ${name}`)
     return value
   }
+  const suite = args.get('--suite') ?? 'live-host'
+  if (!['live-host', 'live-cordis-ui'].includes(suite)) throw new Error(`invalid --suite ${suite}`)
+  const browser = args.get('--browser') === undefined ? undefined : path('--browser')
+  if (suite === 'live-cordis-ui' && browser === undefined) throw new Error('missing --browser')
   return {
     artifactManifest: path('--artifact-manifest'), forkRoot: path('--fork-root'),
     hostPort: port('--host-port'), identityPort: port('--identity-port'),
     modelPort: port('--model-port'), node: path('--node'), output: resolve(args.get('--output') ?? ''),
-    sourceLock: path('--source-lock'), sourceRoot: path('--source-root'),
+    sourceLock: path('--source-lock'), sourceRoot: path('--source-root'), suite, browser,
   }
 }
 
@@ -143,8 +147,9 @@ function sbQuote(path) {
   return JSON.stringify(realpathOrResolved(path))
 }
 
-function sandboxProfile({ forkRoot, node, runtime, sourceRoot }, ports) {
-  const readable = [forkRoot, sourceRoot, dirname(dirname(node))]
+function sandboxProfile({ browser, forkRoot, node, runtime, sourceRoot }, ports) {
+  const browserRoot = browser === undefined ? undefined : dirname(dirname(dirname(browser)))
+  const readable = [forkRoot, sourceRoot, dirname(dirname(node)), ...(browserRoot === undefined ? [] : [browserRoot])]
   const lines = [
     '(version 1)', '(deny default)', '(deny network*)', '(allow process*)', '(allow sysctl-read)',
     '(allow file-read* (literal "/"))', '(allow file-read-metadata (literal "/tmp"))',
@@ -152,7 +157,7 @@ function sandboxProfile({ forkRoot, node, runtime, sourceRoot }, ports) {
   for (const path of [...readable, runtime]) {
     for (const ancestor of [path, ...parents(path)]) lines.push(`(allow file-read-metadata (literal ${sbQuote(ancestor)}))`)
   }
-  for (const path of ['/System', '/usr/lib', '/usr/share', '/usr/bin', '/bin', '/sbin', '/Library/Apple']) {
+  for (const path of ['/System', '/usr/lib', '/usr/share', '/usr/bin', '/bin', '/sbin', '/Library/Apple', '/Library/Fonts']) {
     lines.push(`(allow file-read* (subpath ${sbQuote(path)}))`)
   }
   lines.push('(allow file-read* (literal "/dev/null"))', '(allow file-write* (literal "/dev/null"))',
@@ -166,6 +171,10 @@ function sandboxProfile({ forkRoot, node, runtime, sourceRoot }, ports) {
     lines.push(`(allow network-inbound (local tcp4 "localhost:${String(port)}"))`)
     lines.push(`(allow network-outbound (remote tcp4 "localhost:${String(port)}"))`)
   }
+  if (browser !== undefined) {
+    lines.push('(allow mach-lookup)')
+    lines.push('(allow ipc-posix-shm)')
+  }
   return `${[...new Set(lines)].join('\n')}\n`
 }
 
@@ -177,13 +186,13 @@ function parents(path) {
 }
 
 function runChild(options, output) {
-  const runtime = realpathSync(mkdtempSync(join(tmpdir(), 'lumx-live-host-')))
+  const runtime = realpathSync(mkdtempSync(join(tmpdir(), `lumx-${options.suite}-`)))
   const protectedRoot = realpathSync(mkdtempSync(join(tmpdir(), 'lumx-protected-main-')))
   const canary = join(protectedRoot, 'main-profile-credential.canary')
   writeFileSync(canary, 'synthetic-main-profile-secret\n', { mode: 0o600 })
   const canaryFd = openSync(canary, 'r')
-  const profile = join(runtime, 'live-host.sb')
-  const capture = join(runtime, 'live-host.json')
+  const profile = join(runtime, `${options.suite}.sb`)
+  const capture = join(runtime, `${options.suite}.json`)
   const osHome = join(runtime, 'os-home')
   const workspace = join(runtime, 'workspace')
   const processHome = join(runtime, 'process-home')
@@ -191,10 +200,11 @@ function runChild(options, output) {
   for (const path of [osHome, workspace, processHome, temporary]) mkdirSync(path, { recursive: true, mode: 0o700 })
   writeFileSync(profile, sandboxProfile({ ...options, runtime }, [options.hostPort, options.identityPort, options.modelPort]))
   const argv = [
-    '-f', profile, options.node, join(options.forkRoot, 'lumx/probes/live-host-probe.mjs'),
+    '-f', profile, options.node, join(options.forkRoot, `lumx/probes/${options.suite}-probe.mjs`),
     '--source-root', options.sourceRoot, '--output', capture, '--os-home', osHome, '--workspace', workspace,
     '--host-port', String(options.hostPort), '--identity-port', String(options.identityPort),
     '--model-port', String(options.modelPort),
+    ...(options.browser === undefined ? [] : ['--browser', options.browser]),
   ]
   // Seatbelt must not receive a write grant to the evidence tree. Capture in
   // the isolated runtime and let the unsandboxed parent copy bytes afterward.
@@ -227,8 +237,10 @@ function runChild(options, output) {
       writeFileSync(join(output, 'stdout.log'), redactedLog(stdoutPath), { mode: 0o600 })
       writeFileSync(join(output, 'stderr.log'), redactedLog(stderrPath), { mode: 0o600 })
       mkdirSync(join(output, 'captures'))
-      writeFileSync(join(output, 'captures', 'live-host.sb'), readFileSync(profile), { mode: 0o600 })
-      if (existsSync(capture)) writeFileSync(join(output, 'captures', 'live-host.json'), readFileSync(capture), { mode: 0o600 })
+      writeFileSync(join(output, 'captures', `${options.suite}.sb`), readFileSync(profile), { mode: 0o600 })
+      if (existsSync(capture)) writeFileSync(join(output, 'captures', `${options.suite}.json`), readFileSync(capture), { mode: 0o600 })
+      const screenshot = join(runtime, 'live-cordis-ui.png')
+      if (existsSync(screenshot)) writeFileSync(join(output, 'captures', 'live-cordis-ui.png'), readFileSync(screenshot), { mode: 0o600 })
       const result = {
         argv: ['/usr/bin/sandbox-exec', ...argv], capturePresent: existsSync(capture), code, cwd: workspace,
         envKeys: Object.keys(env).sort(), finishedAt: new Date().toISOString(), signal, startedAt, timedOut,

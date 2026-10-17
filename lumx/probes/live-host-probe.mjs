@@ -168,13 +168,19 @@ async function execute(options, capture) {
   let identityActive = true
   let identitySubjectOverride
   let identityRequests = 0
+  const identityTransactions = []
   let modelRequests = 0
+  const modelTransactions = []
   let now = new Date('2026-10-18T12:00:00.000Z')
   const network = await deniedNetworkAttempt()
   const isolation = isolationCanaries()
   const identityStub = await serverAt(options.identityPort, async (incoming, response) => {
     identityRequests += 1
     const body = await jsonBody(incoming)
+    identityTransactions.push({
+      ordinal: identityRequests, subjectSha256: sha256(String(body.subject)),
+      credentialSha256: sha256(String(body.credential)),
+    })
     response.writeHead(200, { 'content-type': 'application/json' })
     response.end(JSON.stringify({
       active: identityActive,
@@ -186,8 +192,13 @@ async function execute(options, capture) {
     modelRequests += 1
     const body = await jsonBody(incoming)
     const prompt = body.messages.at(-1)?.content?.filter(block => block.type === 'text').map(block => block.text).join('') ?? ''
+    const text = `LUMX synthetic response: ${prompt}`
+    modelTransactions.push({
+      ordinal: modelRequests, promptSha256: sha256(prompt), requestSha256: sha256(JSON.stringify(body)),
+      responseBytes: Buffer.byteLength(text), responseSha256: sha256(text),
+    })
     response.writeHead(200, { 'content-type': 'application/json' })
-    response.end(JSON.stringify({ text: `LUMX synthetic response: ${prompt}` }))
+    response.end(JSON.stringify({ text }))
   })
   const auth = {
     byokKey: 'synthetic-byok-only',
@@ -267,6 +278,10 @@ async function execute(options, capture) {
 
     const oldReadyUrl = runtime.readyUrl
     const oldTokenHash = sha256(new URL(oldReadyUrl).searchParams.get('token'))
+    const profileDirectory = resolve(runtime.dataHomeDirectory, 'profiles', runtime.profileName)
+    const profileFiles = ['package.json', 'cordis.yml', 'cordis.patch.yml', 'lumx.runtime.patch.yml'].map(name => ({
+      name, sha256: sha256(readFileSync(resolve(profileDirectory, name))),
+    }))
     identity = undefined
     await runtime.shutdown()
     runtime = undefined
@@ -284,13 +299,17 @@ async function execute(options, capture) {
         wrongOrigin: { status: wrongOrigin.status }, wrongToken: { status: wrongToken.status },
       },
       identityRequests,
+      identityTransactions,
       isolation,
       modelRequests,
+      modelTransactions,
       network,
       alternateAdapter,
       runtime: {
         baseUrl: restarted.baseUrl,
+        dataHomeDirectory: restarted.dataHomeDirectory,
         pid: restarted.pid,
+        profileFiles,
         profileName: restarted.profileName,
         readyTokenSha256: sha256(new URL(restarted.readyUrl).searchParams.get('token')),
         previousReadyTokenSha256: oldTokenHash,
@@ -332,7 +351,10 @@ async function execute(options, capture) {
         && alternateAdapter.admitted.chunks.at(-1)?.type === 'finish', alternateAdapter.admitted],
       ['byok-positive-model-response', positiveModelRequests === 1
         && positive.assistantText.startsWith('LUMX synthetic response: ') && positive.assistantText.length > 25,
-      { assistantTextBytes: positive.assistantText.length, modelRequests: positiveModelRequests }],
+      {
+        assistantTextBytes: positive.assistantText.length, modelRequests: positiveModelRequests,
+        modelTransaction: modelTransactions[0], requestId: 'request-lumx-positive', sessionId: positive.sessionId,
+      }],
       ['shutdown-restart-clean', restartedReady.status === 303 && staleToken.status === 401
         && capture.runtime.previousReadyTokenSha256 !== capture.runtime.readyTokenSha256,
       { restartedReady: restartedReady.status, staleToken: staleToken.status }],
@@ -342,48 +364,39 @@ async function execute(options, capture) {
     capture.checks = checks
     const byId = new Map(checks.map(check => [check.id, check]))
     const missing = (id, evidence) => ({ evidence, id, required: true, result: 'fail' })
+    const countedResult = (id, subchecks, reasonPass, reasonFail, coverage) => {
+      const passed = subchecks.every(subcheck => subcheck.required !== true || subcheck.result === 'pass')
+      return { id, status: passed ? 'pass' : 'fail', reason: passed ? reasonPass : reasonFail, coverage, subchecks }
+    }
     capture.counted_results = [
-      {
-        id: 'real/Cordis-shutdown', status: 'fail', coverage: 'partial',
-        reason: 'actual Host shutdown/restart ran; seven-row reload/reinstall/late-shutdown lifecycle is not executed by Batch A',
-        subchecks: [byId.get('shutdown-restart-clean'), missing('seven-row-cordis-lifecycle', { executed: false })],
-      },
-      {
-        id: 'real/developer-Host-token-boundary', status: 'fail', coverage: 'actual-shared-web-host',
-        reason: 'HTTP and path fences ran, but an adversarial inherited descriptor remained readable',
-        subchecks: [
+      countedResult('real/Cordis-shutdown', [
+        byId.get('shutdown-restart-clean'), missing('seven-row-cordis-lifecycle', { executed: false }),
+      ], 'Host restart and the complete Cordis lifecycle passed',
+      'actual Host shutdown/restart ran; the complete seven-row lifecycle did not pass', 'partial'),
+      countedResult('real/developer-Host-token-boundary', [
           byId.get('physical-network-denied'), byId.get('main-profile-path-denied'), byId.get('inherited-fd-read-denied'),
           byId.get('host-token-cookie-positive'), byId.get('wrong-token-rejected'),
           byId.get('wrong-origin-rejected'), byId.get('wrong-host-rejected'), byId.get('missing-origin-observed'),
-        ],
-      },
-      {
-        id: 'real/developer-Host-positive', status: 'pass', coverage: 'actual-shared-web-host',
-        reason: 'developer-mode official Host SessionController reached the BYOK adapter and received one nonempty loopback model response',
-        subchecks: [
+        ], 'all shared Web Host fences rejected the adversarial cases',
+      'one or more shared Web Host boundary checks failed', 'actual-shared-web-host'),
+      countedResult('real/developer-Host-positive', [
           byId.get('byok-positive-model-response'), byId.get('byok-anonymous-zero-model'),
           byId.get('byok-wrong-type-zero-model'), byId.get('byok-invalid-expiry-zero-model'),
           byId.get('byok-equal-expiry-zero-model'), byId.get('byok-subject-mismatch-zero-model'),
           byId.get('byok-expired-zero-model'), byId.get('byok-revoked-zero-model'),
           byId.get('byok-other-adapter-anonymous-blocked'), byId.get('byok-other-adapter-positive'),
-        ],
-      },
-      {
-        id: 'real/developer-Host-control', status: 'fail', coverage: 'partial',
-        reason: 'official UI bytes and Host restart ran; no rendered UI control drove cancel/restart in Batch A',
-        subchecks: [
+        ], 'official shared Web Host admitted valid BYOK calls and blocked every tested invalid state across adapters',
+      'one or more actual shared Web Host BYOK positive or negative controls failed', 'actual-shared-web-host'),
+      countedResult('real/developer-Host-control', [
           byId.get('official-ui-page-ready'), byId.get('launch-preparation-failure-recovers'),
           missing('rendered-ui-host-control', { executed: false }),
-        ],
-      },
-      {
-        id: 'real/durable-UI-mapping', status: 'fail', coverage: 'partial',
-        reason: 'actual SessionController events and official UI service ran; durable ACP identity join and browser rendering are not executed by Batch A',
-        subchecks: [
+        ], 'rendered UI drove Host control and launch recovery',
+      'official UI bytes and launch recovery ran; rendered UI Host control did not pass in Batch A', 'partial'),
+      countedResult('real/durable-UI-mapping', [
           byId.get('official-ui-page-ready'), missing('durable-acp-ui-identity-join', { executed: false }),
           missing('rendered-session-event', { executed: false }),
-        ],
-      },
+        ], 'rendered UI joined the external ACP durable Session identity',
+      'actual SessionController and UI service ran; the durable ACP identity join and rendered event did not pass', 'partial'),
     ]
     capture.status = checks.every(check => !check.required || check.result === 'pass') ? 'pass' : 'fail'
     assert.equal(capture.status, 'pass')
