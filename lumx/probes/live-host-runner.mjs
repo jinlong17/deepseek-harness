@@ -135,6 +135,10 @@ function provenance(options) {
   if (product.length === 0) throw new Error('fork lumx source snapshot is empty')
   return {
     artifactManifest: { count: manifest.artifacts.length, sha256: sha256(options.artifactManifest), verified: true },
+    browser: options.browser === undefined ? undefined : {
+      path: options.browser, sha256: sha256(options.browser),
+      version: command(options.browser, ['--version'], options.sourceRoot),
+    },
     build: generatedBuildSnapshot(options.sourceRoot),
     fork: forkSnapshot(options.forkRoot),
     node: { path: options.node, sha256: sha256(options.node), version: lockedNode.version },
@@ -176,9 +180,13 @@ function sandboxProfile({ browser, forkRoot, node, protectedRoot, runtime, sourc
     for (const path of [
       protectedRoot,
       '/Users/jinlong/.a2k', '/Users/jinlong/.aws', '/Users/jinlong/.config', '/Users/jinlong/.ssh',
+      '/Users/jinlong/.lumx', '/Users/jinlong/.lumx-developer', '/Users/jinlong/.claude',
       '/Users/jinlong/Library/Application Support/Google/Chrome', '/Users/jinlong/Library/Keychains',
       '/Users/jinlong/Desktop/Jinlong_project',
     ]) lines.push(`(deny file-read* file-write* (subpath ${sbQuote(path)}))`)
+    for (const path of ['/Users/jinlong/.codex/auth.json', '/Users/jinlong/.npmrc', '/Users/jinlong/.netrc']) {
+      lines.push(`(deny file-read* file-write* (literal ${sbQuote(path)}))`)
+    }
     lines.push('(allow mach-lookup)')
     lines.push('(allow ipc-posix-shm)')
     lines.push('(allow ipc-posix-sem)')
@@ -257,8 +265,9 @@ function runChild(options, output) {
       mkdirSync(join(output, 'captures'))
       writeFileSync(join(output, 'captures', `${options.suite}.sb`), readFileSync(profile), { mode: 0o600 })
       if (existsSync(capture)) writeFileSync(join(output, 'captures', `${options.suite}.json`), readFileSync(capture), { mode: 0o600 })
-      const screenshot = join(runtime, 'live-cordis-ui.png')
-      if (existsSync(screenshot)) writeFileSync(join(output, 'captures', 'live-cordis-ui.png'), readFileSync(screenshot), { mode: 0o600 })
+      for (const name of readdirSync(runtime).filter(name => /^live-cordis-ui(?:-onboarding)?\.png$/u.test(name))) {
+        writeFileSync(join(output, 'captures', name), readFileSync(join(runtime, name)), { mode: 0o600 })
+      }
       const result = {
         argv: ['/usr/bin/sandbox-exec', ...argv], capturePresent: existsSync(capture), code, cwd: workspace,
         envKeys: Object.keys(env).sort(), finishedAt: new Date().toISOString(), signal, startedAt, timedOut,

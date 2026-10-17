@@ -363,16 +363,11 @@ async function execute(options, capture) {
     }))
     capture.checks = checks
     const byId = new Map(checks.map(check => [check.id, check]))
-    const missing = (id, evidence) => ({ evidence, id, required: true, result: 'fail' })
     const countedResult = (id, subchecks, reasonPass, reasonFail, coverage) => {
       const passed = subchecks.every(subcheck => subcheck.required !== true || subcheck.result === 'pass')
       return { id, status: passed ? 'pass' : 'fail', reason: passed ? reasonPass : reasonFail, coverage, subchecks }
     }
     capture.counted_results = [
-      countedResult('real/Cordis-shutdown', [
-        byId.get('shutdown-restart-clean'), missing('seven-row-cordis-lifecycle', { executed: false }),
-      ], 'Host restart and the complete Cordis lifecycle passed',
-      'actual Host shutdown/restart ran; the complete seven-row lifecycle did not pass', 'partial'),
       countedResult('real/developer-Host-token-boundary', [
           byId.get('physical-network-denied'), byId.get('main-profile-path-denied'), byId.get('inherited-fd-read-denied'),
           byId.get('host-token-cookie-positive'), byId.get('wrong-token-rejected'),
@@ -387,16 +382,6 @@ async function execute(options, capture) {
           byId.get('byok-other-adapter-anonymous-blocked'), byId.get('byok-other-adapter-positive'),
         ], 'official shared Web Host admitted valid BYOK calls and blocked every tested invalid state across adapters',
       'one or more actual shared Web Host BYOK positive or negative controls failed', 'actual-shared-web-host'),
-      countedResult('real/developer-Host-control', [
-          byId.get('official-ui-page-ready'), byId.get('launch-preparation-failure-recovers'),
-          missing('rendered-ui-host-control', { executed: false }),
-        ], 'rendered UI drove Host control and launch recovery',
-      'official UI bytes and launch recovery ran; rendered UI Host control did not pass in Batch A', 'partial'),
-      countedResult('real/durable-UI-mapping', [
-          byId.get('official-ui-page-ready'), missing('durable-acp-ui-identity-join', { executed: false }),
-          missing('rendered-session-event', { executed: false }),
-        ], 'rendered UI joined the external ACP durable Session identity',
-      'actual SessionController and UI service ran; the durable ACP identity join and rendered event did not pass', 'partial'),
     ]
     capture.status = checks.every(check => !check.required || check.result === 'pass') ? 'pass' : 'fail'
     assert.equal(capture.status, 'pass')

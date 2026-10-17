@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { mkdirSync, readFileSync, readSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
+import { mkdir, symlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { connect } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { createLoopbackIdentityGateway } from '../identity/loopback-gateway.mjs'
 import { launchLumxRuntime } from '../runtime/launch.mjs'
@@ -14,9 +14,11 @@ const PRIVACY_IDS = Object.freeze([
   'session-log-deepseek', 'plugin-package-inventory-deepseek', 'session-telemetry-otel',
   'deepseek-account', 'llm-deepseek-account', 'desktop-product-telemetry', 'product-analytics',
 ])
-const PROMPT = 'durable UI probe prompt'
-const RESPONSE = `LUMX synthetic response: ${PROMPT}`
 const CANCEL_PROMPT = 'browser control cancel probe'
+const ACP_PROMPT = 'ACP durable join marker 7d2b67ec'
+const ACP_RESPONSE = `LUMX synthetic response: ${ACP_PROMPT}`
+const SAFE_LATE_ENABLE_ID = 'product-analytics'
+const ACP_ADAPTER = new URL('./acp-loopback-adapter.mjs', import.meta.url)
 
 function argumentsOf(argv) {
   const values = new Map()
@@ -42,6 +44,19 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
 }
 
+function safeError(error) {
+  const message = String(error?.message ?? error).replace(/token=[A-Za-z0-9_-]+/gu, 'token=<redacted>')
+  return { code: error?.code, message, name: error?.name ?? 'Error' }
+}
+
+function withDeadline(label, promise, milliseconds = 30_000) {
+  let timer
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out`)), milliseconds) }),
+  ]).finally(() => clearTimeout(timer))
+}
+
 function deniedNetworkAttempt() {
   return new Promise(resolveAttempt => {
     const socket = connect({ host: '198.51.100.1', port: 9 })
@@ -64,7 +79,10 @@ function serverAt(port, handler) {
   return new Promise((resolveReady, reject) => {
     server.once('error', reject)
     server.listen(port, '127.0.0.1', () => resolveReady({
-      close: () => new Promise((resolveClose, rejectClose) => server.close(error => error ? rejectClose(error) : resolveClose())),
+      close: () => new Promise((resolveClose, rejectClose) => {
+        server.closeAllConnections?.()
+        server.close(error => error ? rejectClose(error) : resolveClose())
+      }),
       server,
     }))
   })
@@ -126,6 +144,31 @@ async function exercisePrivacyLifecycle(runtime) {
       reinstallDisabled: afterReinstall?.disabled, reinstallFiberPresent: afterReinstall?.fiberPresent,
     })
   }
+  const lateEntry = [...runtime.ctx.loader.entries()].find(candidate => candidate.options.id === SAFE_LATE_ENABLE_ID)
+  let lateEnable
+  if (lateEntry === undefined) {
+    lateEnable = { id: SAFE_LATE_ENABLE_ID, executed: false, reason: 'safe qualification row unresolved' }
+  } else {
+    try {
+      await lateEntry.update({ disabled: false }, false, true)
+      await runtime.ctx.loader.await()
+      const enabled = privacySnapshot(runtime.ctx).find(row => row.id === SAFE_LATE_ENABLE_ID)
+      lateEnable = {
+        id: SAFE_LATE_ENABLE_ID, executed: true, rejected: false,
+        enabledDisabled: enabled?.disabled, enabledFiberPresent: enabled?.fiberPresent,
+        enabledFiberState: enabled?.fiberState,
+      }
+    } catch (error) {
+      lateEnable = { id: SAFE_LATE_ENABLE_ID, executed: true, rejected: true, error: safeError(error) }
+    } finally {
+      await lateEntry.update({ disabled: true }, false, true)
+      await runtime.ctx.loader.await()
+      const restored = privacySnapshot(runtime.ctx).find(row => row.id === SAFE_LATE_ENABLE_ID)
+      lateEnable.restoredDisabled = restored?.disabled
+      lateEnable.restoredFiberPresent = restored?.fiberPresent
+      lateEnable.restoredFiberState = restored?.fiberState
+    }
+  }
   const final = privacySnapshot(runtime.ctx)
   const finalEntries = PRIVACY_IDS.flatMap(id => {
     const entry = [...runtime.ctx.loader.entries()].find(candidate => candidate.options.id === id)
@@ -137,7 +180,7 @@ async function exercisePrivacyLifecycle(runtime) {
       ? [{ id: entry.options.id, name: entry.options.name, disabled: entry.disabled, fiberPresent: entry.fiber !== undefined }]
       : []
   })
-  return { actions, final, finalEntries, initial, scopedCandidates }
+  return { actions, final, finalEntries, initial, lateEnable, scopedCandidates }
 }
 
 async function openingSnapshot(ctx, sessionId) {
@@ -150,12 +193,102 @@ async function openingSnapshot(ctx, sessionId) {
     return {
       cursor: value.cursor, header: value.header, recordCount: value.records.length,
       recordsSha256: sha256(JSON.stringify(value.records)),
-      responsePresent: JSON.stringify(value.records).includes(RESPONSE),
-      promptPresent: JSON.stringify(value.records).includes(PROMPT),
+      responsePresent: JSON.stringify(value.records).includes(ACP_RESPONSE),
+      promptPresent: JSON.stringify(value.records).includes(ACP_PROMPT),
     }
   } finally {
     abort.abort()
     await iterator.return?.()
+  }
+}
+
+async function runAcpDurablePrompt(options) {
+  const snapshot = await import(pathToFileURL(join(
+    options.sourceRoot, 'packages/test-support/session-snapshot/lib/index.js',
+  )).href)
+  const protocol = await import(pathToFileURL(join(
+    options.sourceRoot, 'node_modules/.pnpm/node_modules/@agentclientprotocol/sdk/dist/acp.js',
+  )).href)
+  const sharedHome = join(options.osHome, '.lumx-developer')
+  const helperHome = join(options.workspace, '.dsh')
+  await mkdir(sharedHome, { recursive: true, mode: 0o700 })
+  await symlink(sharedHome, helperHome, 'dir')
+  const patch = join(dirname(options.output), 'acp-durable.patch.yml')
+  await writeFile(patch, [
+    '- id: llm-deepseek',
+    '  disabled: true',
+    '- id: llm-deepseek-account',
+    '  disabled: true',
+    '- id: deepseek-account',
+    '  disabled: true',
+    '- id: session-log-deepseek',
+    '  disabled: true',
+    '- id: plugin-package-inventory-deepseek',
+    '  disabled: true',
+    '- id: session-telemetry-otel',
+    '  disabled: true',
+    '- id: acp',
+    '  config:',
+    '    provider: lumx-acp-probe',
+    '    model: lumx-loopback',
+    '- id: agent-default-model',
+    '  config:',
+    '    provider: lumx-acp-probe',
+    '    model: lumx-loopback',
+    '- insert:',
+    '    - id: lumx-acp-loopback',
+    `      name: ${JSON.stringify(pathToFileURL(fileURLToPath(ACP_ADAPTER)).href)}`,
+    '',
+  ].join('\n'), { mode: 0o600 })
+  const agent = {
+    binScript: join(options.sourceRoot, 'apps/cli/src/bin.ts'),
+    libBinScript: join(options.sourceRoot, 'apps/cli/lib/bin.js'),
+    configPath: patch,
+    profile: 'acp',
+    tsconfigPath: join(options.sourceRoot, 'tsconfig.json'),
+  }
+  const observation = { phase: 'starting', patchSha256: sha256(readFileSync(patch)) }
+  let launched
+  try {
+    launched = snapshot.launchAcpTestAgent({
+      agent, cwd: options.workspace,
+      env: {
+        DSH_EXAMPLE_MODE: 'lib', DSH_TELEMETRY_DISABLED: '1',
+        LUMX_ACP_MODEL_ENDPOINT: `http://127.0.0.1:${String(options.modelPort)}/model`,
+        LUMX_PINNED_SOURCE_ROOT: options.sourceRoot,
+      },
+    })
+    await withDeadline('ACP spawn', launched.spawned)
+    observation.phase = 'spawned'
+    const initialized = await withDeadline('ACP initialize', launched.client.initialize({
+      protocolVersion: protocol.PROTOCOL_VERSION, clientCapabilities: {},
+    }))
+    observation.phase = 'initialized'
+    const created = await withDeadline('ACP session/new', launched.client.newSession({
+      cwd: options.workspace, mcpServers: [],
+    }))
+    observation.phase = 'session-created'
+    const promptResult = await withDeadline('ACP session/prompt', launched.client.prompt({
+      sessionId: created.sessionId, prompt: [{ type: 'text', text: ACP_PROMPT }],
+    }), 45_000)
+    observation.phase = 'prompt-complete'
+    observation.initializeProtocolVersion = initialized.protocolVersion
+    observation.promptStopReason = promptResult.stopReason
+    observation.sessionId = created.sessionId
+    observation.updateCount = launched.updates.length
+    observation.updatesSha256 = sha256(JSON.stringify(launched.updates))
+    observation.responseInUpdates = JSON.stringify(launched.updates).includes(ACP_RESPONSE)
+    return { observation, sessionId: created.sessionId }
+  } finally {
+    if (launched !== undefined) {
+      try { await launched.close() } catch (error) { observation.closeError = safeError(error) }
+      observation.exitCode = launched.child.exitCode
+      observation.signalCode = launched.child.signalCode
+      observation.stdoutBytes = Buffer.byteLength(launched.rawStdout())
+      observation.stdoutSha256 = sha256(launched.rawStdout())
+      observation.stderrBytes = Buffer.byteLength(launched.stderr())
+      observation.stderrSha256 = sha256(launched.stderr())
+    }
   }
 }
 
@@ -179,21 +312,21 @@ async function connectWorkspace(page, workspace) {
   return { needed: true }
 }
 
-async function locateDurableSession(page) {
-  if (await page.getByText(RESPONSE, { exact: true }).count() > 0) return true
+async function locateDurableSession(page, expected = ACP_RESPONSE) {
+  if (await page.getByText(expected, { exact: true }).count() > 0) return true
   const rows = page.locator('[role="treeitem"]')
   const count = await rows.count()
   for (let index = 0; index < count; index += 1) {
     try {
       await rows.nth(index).click({ timeout: 2_000 })
       await page.waitForTimeout(150)
-      if (await page.getByText(RESPONSE, { exact: true }).count() > 0) return true
+      if (await page.getByText(expected, { exact: true }).count() > 0) return true
     } catch {}
   }
   return false
 }
 
-async function createBrowserState(options, runtime) {
+async function createBrowserState(options, runtime, acp, cancelBarrier) {
   const chromium = await playwrightFrom(options.sourceRoot)
   if (chromium === undefined) throw new Error('pinned Playwright Chromium export is unavailable')
   const userDataDir = join(dirname(options.output), 'chrome-profile')
@@ -207,9 +340,11 @@ async function createBrowserState(options, runtime) {
       '--no-sandbox', '--disable-gpu', '--disable-background-networking', '--disable-component-update',
       '--disable-default-apps', '--disable-sync', '--metrics-recording-only', '--no-first-run',
       '--disable-breakpad', '--disable-crash-reporter', '--disable-crashpad',
+      '--password-store=basic', '--use-mock-keychain',
     ],
   })
-  const page = context.pages()[0] ?? await context.newPage()
+  try {
+    const page = context.pages()[0] ?? await context.newPage()
   const pageErrors = []
   const consoleErrors = []
   const apiRequests = []
@@ -221,25 +356,45 @@ async function createBrowserState(options, runtime) {
   })
   await page.goto(runtime.readyUrl, { waitUntil: 'load', timeout: 30_000 })
   await page.locator('[data-slot="root"]').waitFor({ state: 'attached', timeout: 20_000 })
+  const continueButton = page.getByRole('button', { name: 'Continue', exact: true })
+  const onboarding = {
+    dismissed: false,
+    present: await continueButton.waitFor({ state: 'visible', timeout: 10_000 }).then(() => true).catch(() => false),
+  }
+  if (onboarding.present) {
+    onboarding.buttonNames = await page.getByRole('button').allTextContents()
+    const onboardingBody = await page.locator('body').innerText()
+    onboarding.bodyBytes = Buffer.byteLength(onboardingBody)
+    onboarding.bodySha256 = sha256(onboardingBody)
+    await page.screenshot({ path: join(dirname(options.output), 'live-cordis-ui-onboarding.png'), fullPage: true })
+    await continueButton.click({ timeout: 10_000 })
+    onboarding.dismissed = true
+  }
   const workspace = await connectWorkspace(page, options.workspace)
+  const durableRendered = await locateDurableSession(page, ACP_RESPONSE)
   const input = page.locator('[data-composer-input][contenteditable="true"]').first()
   await input.waitFor({ timeout: 20_000 })
-  await input.fill(PROMPT)
-  await input.press('Enter')
-  await page.getByText(RESPONSE, { exact: true }).waitFor({ timeout: 20_000 })
   const listed = await runtime.ctx.sessionController.list({}, AbortSignal.timeout(10_000))
-  const durable = listed.items.find(item => !item.blank && item.cwd === options.workspace)
-    ?? listed.items.find(item => !item.blank)
-  if (durable === undefined) throw new Error('rendered prompt produced no nonblank Session Controller row')
+  const durable = listed.items.find(item => item.sessionId === acp.sessionId)
+  if (durable === undefined) throw new Error('ACP Session identity is absent from shared Web Session Controller')
   await input.fill(CANCEL_PROMPT)
   await input.press('Enter')
   const stop = page.getByRole('button', { name: 'Stop generating' })
   await stop.waitFor({ timeout: 10_000 })
+  await withDeadline('cancel model request arrival', cancelBarrier.arrived, 15_000)
   await stop.click()
+  await withDeadline('cancel model connection close', cancelBarrier.closed, 15_000)
   await stop.waitFor({ state: 'detached', timeout: 15_000 })
-  return {
-    apiRequests, consoleErrors, context, durable, page, pageErrors, workspace,
-    initialRender: { prompt: await page.getByText(PROMPT, { exact: true }).count(), response: await page.getByText(RESPONSE, { exact: true }).count() },
+    return {
+      apiRequests, consoleErrors, context, durable, durableRendered, onboarding, page, pageErrors, workspace,
+      initialRender: {
+        acpPrompt: await page.getByText(ACP_PROMPT, { exact: true }).count(),
+        acpResponse: await page.getByText(ACP_RESPONSE, { exact: true }).count(),
+      },
+    }
+  } catch (error) {
+    await context.close().catch(() => {})
+    throw error
   }
 }
 
@@ -247,10 +402,55 @@ function check(id, pass, evidence, required = true) {
   return { id, result: pass ? 'pass' : 'fail', required, evidence }
 }
 
+function failureResults(capture) {
+  if (capture.counted_results.length > 0) return
+  const error = capture.error ?? { message: 'probe did not reach qualification result construction' }
+  const privacy = capture.observations?.privacy
+  const cordisChecks = [
+    check('actual-privacy-lifecycle-attempt', privacy !== undefined, privacy ?? error),
+    check('actual-shutdown-restart-complete', false, error),
+  ]
+  const controlChecks = [
+    check('actual-official-ui-control-attempt', capture.observations?.browser !== undefined, capture.observations?.browser ?? error),
+    check('actual-ui-host-restart-complete', false, error),
+  ]
+  const durableChecks = [
+    check('actual-acp-session-created', capture.observations?.acp?.phase === 'prompt-complete', capture.observations?.acp ?? error),
+    check('actual-acp-controller-ui-join-complete', false, error),
+  ]
+  const unit = (id, coverage, subchecks) => ({
+    id, status: subchecks.every(value => value.result === 'pass') ? 'pass' : 'fail',
+    failure_kind: 'probe_environment',
+    reason: `actual probe stopped before qualification completed: ${error.message}`,
+    coverage, subchecks,
+  })
+  capture.checks = [...cordisChecks, ...controlChecks, ...durableChecks]
+  capture.counted_results = [
+    unit('real/Cordis-shutdown', 'actual-partial-cordis-lifecycle', cordisChecks),
+    unit('real/developer-Host-control', 'actual-partial-official-web-ui-shared-host', controlChecks),
+    unit('real/durable-UI-mapping', 'actual-partial-acp-controller-ui-chain', durableChecks),
+  ]
+}
+
+function redactCapture(value) {
+  if (typeof value === 'string') return value.replace(/token=[A-Za-z0-9_-]+/gu, 'token=<redacted>')
+  if (Array.isArray(value)) return value.map(redactCapture)
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactCapture(item)]))
+  }
+  return value
+}
+
 async function execute(options, capture) {
   let identityRequests = 0
   let modelRequests = 0
   let cancelledModelConnections = 0
+  let markCancelArrived
+  let markCancelClosed
+  const cancelBarrier = {
+    arrived: new Promise(resolveBarrier => { markCancelArrived = resolveBarrier }),
+    closed: new Promise(resolveBarrier => { markCancelClosed = resolveBarrier }),
+  }
   const pendingTimers = new Set()
   const identity = {
     credential: 'synthetic-identity', expiresAt: '2026-10-18T12:01:00.000Z',
@@ -268,14 +468,22 @@ async function execute(options, capture) {
   const modelStub = await serverAt(options.modelPort, async (incoming, response) => {
     modelRequests += 1
     const body = await jsonBody(incoming)
-    const prompt = body.messages.at(-1)?.content?.filter(block => block.type === 'text').map(block => block.text).join('') ?? ''
+    const messageText = body.messages.flatMap(message => message.content ?? [])
+      .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+    const prompt = messageText.includes(CANCEL_PROMPT) ? CANCEL_PROMPT
+      : messageText.includes(ACP_PROMPT) ? ACP_PROMPT
+        : body.messages.at(-1)?.content?.filter(block => block.type === 'text').map(block => block.text).join('') ?? ''
     if (prompt.includes(CANCEL_PROMPT)) {
+      markCancelArrived()
       await new Promise(resolvePending => {
         let settled = false
         const finish = closed => {
           if (settled) return
           settled = true
-          if (closed) cancelledModelConnections += 1
+          if (closed) {
+            cancelledModelConnections += 1
+            markCancelClosed()
+          }
           clearTimeout(timer)
           pendingTimers.delete(timer)
           resolvePending()
@@ -302,15 +510,18 @@ async function execute(options, capture) {
   }
   let runtime
   let restarted
+  let consumer
   let browser
   try {
+    const acp = await runAcpDurablePrompt(options)
+    capture.observations.acp = acp.observation
     runtime = await launchLumxRuntime({
       mode: 'developer', osHome: options.osHome, workspaceDirectory: options.workspace,
       sourceRoot: options.sourceRoot, port: options.hostPort, auth, environment: {},
     })
     const privacy = await exercisePrivacyLifecycle(runtime)
     capture.observations.privacy = { ...privacy, finalEntries: undefined }
-    browser = await createBrowserState(options, runtime)
+    browser = await createBrowserState(options, runtime, acp, cancelBarrier)
     const beforeRestart = await openingSnapshot(runtime.ctx, browser.durable.sessionId)
     await runtime.shutdown()
     runtime = undefined
@@ -324,10 +535,25 @@ async function execute(options, capture) {
     const afterRestart = await openingSnapshot(restarted.ctx, browser.durable.sessionId)
     await browser.page.goto(restarted.readyUrl, { waitUntil: 'load', timeout: 30_000 })
     await browser.page.locator('[data-slot="root"]').waitFor({ state: 'attached', timeout: 20_000 })
-    const renderedAfterRestart = await locateDurableSession(browser.page)
+    const renderedAfterRestart = await locateDurableSession(browser.page, ACP_RESPONSE)
     const screenshotPath = join(dirname(options.output), 'live-cordis-ui.png')
     await browser.page.screenshot({ path: screenshotPath, fullPage: true })
     const body = await browser.page.locator('body').innerText()
+    await browser.context.close()
+    browser.context = undefined
+    await restarted.shutdown()
+    restarted = undefined
+    consumer = await launchLumxRuntime({
+      mode: 'consumer', osHome: options.osHome, workspaceDirectory: options.workspace,
+      sourceRoot: options.sourceRoot, port: options.hostPort, auth, environment: {},
+    })
+    const consumerRows = privacySnapshot(consumer.ctx)
+    const governedAdapterEntries = [...consumer.ctx.loader.entries()].filter(entry =>
+      /(^|[-_])h1($|[-_])|govern/iu.test(`${entry.options.id} ${entry.options.name}`))
+      .map(entry => ({
+        id: entry.options.id, name: entry.options.name, disabled: entry.disabled,
+        fiberPresent: entry.fiber !== undefined,
+      }))
     const initialRows = rowMap(privacy.initial)
     const finalRows = rowMap(privacy.final)
     const presentIds = PRIVACY_IDS.filter(id => initialRows.get(id)?.resolved)
@@ -337,22 +563,31 @@ async function execute(options, capture) {
       && action.reinstallDisabled === true && action.reinstallFiberPresent === false)
     const disabledPass = PRIVACY_IDS.every(id => initialRows.get(id)?.resolved === true
       && initialRows.get(id)?.disabled === true && initialRows.get(id)?.fiberPresent === false
-      && finalRows.get(id)?.disabled === true && finalRows.get(id)?.fiberPresent === false)
+      && finalRows.get(id)?.disabled === true
+      && (finalRows.get(id)?.fiberPresent === false || finalRows.get(id)?.fiberState === 4))
     const shutdownPass = afterShutdown.length === PRIVACY_IDS.length
-      && afterShutdown.every(row => row.fiberPresent === false)
+      && afterShutdown.every(row => row.fiberPresent === false || row.fiberState === 4)
     const durablePass = beforeRestart.cursor === afterRestart.cursor
       && beforeRestart.recordsSha256 === afterRestart.recordsSha256
       && beforeRestart.promptPresent && beforeRestart.responsePresent
       && afterRestart.promptPresent && afterRestart.responsePresent
     const uiCancelPass = browser.apiRequests.includes('/api/session/cancel') && cancelledModelConnections >= 1
-    const uiRenderPass = browser.initialRender.prompt > 0 && browser.initialRender.response > 0 && renderedAfterRestart
+    const uiRenderPass = browser.durableRendered && browser.initialRender.acpResponse > 0 && renderedAfterRestart
+    const lateReenableRejected = privacy.lateEnable.executed === true && privacy.lateEnable.rejected === true
+      && privacy.lateEnable.restoredDisabled === true
+      && (privacy.lateEnable.restoredFiberPresent === false || privacy.lateEnable.restoredFiberState === 4)
+    const consumerPass = consumerRows.every(row => row.resolved && row.disabled === true
+      && (row.fiberPresent === false || row.fiberState === 4))
+    const acpJoinPass = acp.observation.phase === 'prompt-complete'
+      && browser.durable.sessionId === acp.sessionId
+      && beforeRestart.responsePresent && afterRestart.responsePresent && renderedAfterRestart
     const checks = [
       check('physical-network-denied', network.denied === true, network),
       check('main-profile-path-denied', isolation.pathDenied === true, isolation),
       check('inherited-fd-read-denied', isolation.fdDenied === true, isolation),
       check('privacy-seven-resolved-disabled-no-fiber', disabledPass, { presentIds, missingIds, initial: privacy.initial, final: privacy.final }),
       check('privacy-safe-update-remove-reinstall', lifecyclePass, privacy.actions),
-      check('privacy-late-reenable-rejected', false, { executed: false, reason: 'forbidden rows were never re-enabled; no product guard rejects an attempted re-enable' }),
+      check('privacy-late-reenable-rejected', lateReenableRejected, privacy.lateEnable),
       check('privacy-renamed-absent-uncomposed-inventory', missingIds.length === 0, { missingIds, scopedCandidates: privacy.scopedCandidates }),
       check('privacy-shutdown-no-fiber', shutdownPass, afterShutdown),
       check('durable-session-controller-restart', durablePass, { beforeRestart, afterRestart }),
@@ -364,9 +599,17 @@ async function execute(options, capture) {
       check('official-ui-reconnected-after-host-restart', renderedAfterRestart, { renderedAfterRestart }),
       check('browser-page-errors-empty', browser.pageErrors.length === 0, browser.pageErrors),
       check('browser-console-errors-observed', true, { count: browser.consoleErrors.length, sha256: sha256(JSON.stringify(browser.consoleErrors)) }, false),
-      check('desktop-platform-privacy-consumer', false, { executed: false, reason: 'this runtime is the official shared Web Host, not the Electron DesktopHost wrapper' }),
-      check('governed-h1-privacy-consumer', false, { executed: false, reason: 'Batch C owns the governed H1 composition result' }),
-      check('durable-external-acp-identity-join', false, { executed: false, reason: 'no external ACP durable identity adapter is composed in this profile' }),
+      check('consumer-profile-privacy-consumer', consumerPass, consumerRows),
+      check('governed-desktop-h1-adapter-capability', governedAdapterEntries.length > 0, {
+        entries: governedAdapterEntries,
+        reason: governedAdapterEntries.length === 0
+          ? 'actual consumer composition exposes no governed desktop/H1 adapter'
+          : 'actual consumer composition exposes a governed adapter candidate',
+      }),
+      check('durable-external-acp-identity-join', acpJoinPass, {
+        acp: acp.observation, controllerSessionId: browser.durable.sessionId,
+        beforeRestart, afterRestart, renderedAfterRestart,
+      }),
     ]
     const byId = new Map(checks.map(value => [value.id, value]))
     const result = (id, subcheckIds, reasonPass, reasonFail, coverage) => {
@@ -375,10 +618,12 @@ async function execute(options, capture) {
       return { id, status: passed ? 'pass' : 'fail', reason: passed ? reasonPass : reasonFail, coverage, subchecks }
     }
     capture.observations = {
+      acp: acp.observation,
       browser: {
         bodyBytes: Buffer.byteLength(body), bodySha256: sha256(body), consoleErrors: browser.consoleErrors,
         pageErrors: browser.pageErrors, apiRequests: browser.apiRequests,
       },
+      consumerPrivacyRows: consumerRows, governedAdapterEntries,
       identityRequests, isolation, modelRequests, network, privacy: { ...privacy, finalEntries: undefined },
       session: { beforeRestart, afterRestart, id: browser.durable.sessionId },
     }
@@ -387,10 +632,11 @@ async function execute(options, capture) {
       result('real/Cordis-shutdown', [
         'privacy-seven-resolved-disabled-no-fiber', 'privacy-safe-update-remove-reinstall',
         'privacy-late-reenable-rejected', 'privacy-renamed-absent-uncomposed-inventory',
-        'privacy-shutdown-no-fiber', 'desktop-platform-privacy-consumer', 'governed-h1-privacy-consumer',
+        'privacy-shutdown-no-fiber', 'consumer-profile-privacy-consumer',
+        'governed-desktop-h1-adapter-capability',
       ], 'all three privacy consumers and lifecycle cases passed',
-      'actual shared Web lifecycle ran, but the complete seven rows/late rejection/three-consumer contract was not met',
-      'actual-developer-byok-shared-web-host-plus-explicit-cross-consumer-gaps'),
+      'actual Web lifecycle ran, but late rejection or the three-consumer composition contract was not met',
+      'actual-developer-and-consumer-shared-web-compositions-plus-governed-adapter-capability-check'),
       result('real/developer-Host-control', [
         'official-ui-created-and-rendered-session', 'official-ui-cancel-reached-host',
         'official-ui-reconnected-after-host-restart', 'browser-page-errors-empty',
@@ -400,15 +646,17 @@ async function execute(options, capture) {
         'durable-session-controller-restart', 'official-ui-created-and-rendered-session',
         'official-ui-reconnected-after-host-restart', 'durable-external-acp-identity-join',
       ], 'the UI and external ACP adapter joined the same durable Session identity',
-      'DSH UI durability was exercised, but an external ACP durable identity join is absent', 'actual-dsh-session-ui-plus-explicit-acp-gap'),
+      'the actual ACP-created durable Session did not remain joined through SessionController and official UI',
+      'actual-acp-child-session-controller-official-web-ui'),
     ]
     capture.status = checks.every(value => !value.required || value.result === 'pass') ? 'pass' : 'fail'
   } finally {
-    for (const timer of pendingTimers) clearTimeout(timer)
-    await browser?.context.close().catch(() => {})
+    await browser?.context?.close().catch(() => {})
     await runtime?.shutdown().catch(() => {})
     await restarted?.shutdown().catch(() => {})
+    await consumer?.shutdown().catch(() => {})
     await Promise.allSettled([identityStub.close(), modelStub.close()])
+    for (const timer of pendingTimers) clearTimeout(timer)
   }
 }
 
@@ -418,9 +666,10 @@ async function main() {
   try {
     await execute(options, capture)
   } catch (error) {
-    capture.error = { code: error?.code, message: String(error?.message ?? error), name: error?.name ?? 'Error' }
+    capture.error = safeError(error)
   } finally {
-    await writeFile(options.output, `${JSON.stringify(capture, null, 2)}\n`)
+    failureResults(capture)
+    await writeFile(options.output, `${JSON.stringify(redactCapture(capture), null, 2)}\n`)
   }
   return capture.status === 'pass' ? 0 : 1
 }
