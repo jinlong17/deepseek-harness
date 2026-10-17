@@ -7,7 +7,7 @@ import {
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 
-const PINNED_SOURCE = '639ed015397290b3745d163aafe02ffee4aa3f84'
+const EXPECTED_SOURCE_LOCK_SHA256 = '8840a86d7e4b958afd0eafc45db9573c84643c03b51566d91df01d9e0b1da57a'
 
 function argsOf(argv) {
   const args = new Map()
@@ -94,30 +94,34 @@ function dirtyPaths(root) {
   return paths
 }
 
-function forkSnapshot(forkRoot) {
-  execFileSync('/usr/bin/git', ['merge-base', '--is-ancestor', PINNED_SOURCE, 'HEAD'], { cwd: forkRoot })
-  const committed = git(forkRoot, 'diff', '--name-only', `${PINNED_SOURCE}..HEAD`).split('\n').filter(Boolean)
+function forkSnapshot(forkRoot, pinnedCommit) {
+  execFileSync('/usr/bin/git', ['merge-base', '--is-ancestor', pinnedCommit, 'HEAD'], { cwd: forkRoot })
+  const committed = git(forkRoot, 'diff', '--name-only', `${pinnedCommit}..HEAD`).split('\n').filter(Boolean)
   const dirty = dirtyPaths(forkRoot)
   const outside = [...committed, ...dirty].filter(path => !path.startsWith('lumx/'))
   if (outside.length > 0) throw new Error(`fork change escaped lumx/: ${outside.join(', ')}`)
-  return { committed, dirty, head: git(forkRoot, 'rev-parse', 'HEAD'), pinnedAncestor: PINNED_SOURCE }
+  return { committed, dirty, head: git(forkRoot, 'rev-parse', 'HEAD'), pinnedAncestor: pinnedCommit }
 }
 
-function sourceSnapshot(sourceRoot) {
+function sourceSnapshot(sourceRoot, pinnedCommit) {
   const head = git(sourceRoot, 'rev-parse', 'HEAD')
-  if (head !== PINNED_SOURCE) throw new Error(`source is not pinned at ${PINNED_SOURCE}`)
+  if (head !== pinnedCommit) throw new Error(`source is not pinned at ${pinnedCommit}`)
   const dirty = dirtyPaths(sourceRoot)
   if (dirty.length > 0) throw new Error(`pinned source has tracked/untracked changes: ${dirty.join(', ')}`)
   return { commit: head, tree: git(sourceRoot, 'rev-parse', 'HEAD^{tree}') }
 }
 
-function provenance(options) {
+function sourceAndRuntimeSnapshot(options) {
+  if (sha256(options.sourceLock) !== EXPECTED_SOURCE_LOCK_SHA256) {
+    throw new Error('source lock differs from the expected A2K source lock')
+  }
   const sourceLock = JSON.parse(readFileSync(options.sourceLock, 'utf8'))
+  const pinnedCommit = sourceLock.dsh.commit
   const manifest = JSON.parse(readFileSync(options.artifactManifest, 'utf8'))
   if (sha256(options.artifactManifest) !== sourceLock.dsh.build_artifacts_sha256) {
     throw new Error('build artifact manifest differs from source lock')
   }
-  if (manifest.source_commit !== PINNED_SOURCE || sourceLock.dsh.commit !== PINNED_SOURCE) {
+  if (manifest.source_commit !== pinnedCommit) {
     throw new Error('source commit differs from pinned source lock')
   }
   const bad = manifest.artifacts.filter(row => {
@@ -140,10 +144,10 @@ function provenance(options) {
       version: command(options.browser, ['--version'], options.sourceRoot),
     },
     build: generatedBuildSnapshot(options.sourceRoot),
-    fork: forkSnapshot(options.forkRoot),
+    fork: forkSnapshot(options.forkRoot, pinnedCommit),
     node: { path: options.node, sha256: sha256(options.node), version: lockedNode.version },
     product,
-    source: sourceSnapshot(options.sourceRoot),
+    source: sourceSnapshot(options.sourceRoot, pinnedCommit),
   }
 }
 
@@ -283,10 +287,10 @@ async function main() {
   const options = argsOf(process.argv.slice(2))
   if (options.output === resolve('')) throw new Error('missing --output')
   if (existsSync(options.output)) throw new Error(`refusing to overwrite ${options.output}`)
-  const before = provenance(options)
+  const before = sourceAndRuntimeSnapshot(options)
   mkdirSync(options.output, { recursive: false, mode: 0o700 })
   const processResult = await runChild(options, options.output)
-  const after = provenance(options)
+  const after = sourceAndRuntimeSnapshot(options)
   const frozen = JSON.stringify(before) === JSON.stringify(after)
   const success = processResult.code === 0 && !processResult.timedOut && processResult.capturePresent && frozen
   const files = filesUnder(options.output, '.').filter(row => row.path !== 'receipt.json')
