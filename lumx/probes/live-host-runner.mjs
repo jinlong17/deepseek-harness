@@ -147,11 +147,12 @@ function sbQuote(path) {
   return JSON.stringify(realpathOrResolved(path))
 }
 
-function sandboxProfile({ browser, forkRoot, node, runtime, sourceRoot }, ports) {
+function sandboxProfile({ browser, forkRoot, node, protectedRoot, runtime, sourceRoot }, ports) {
   const browserRoot = browser === undefined ? undefined : dirname(dirname(dirname(browser)))
   const readable = [forkRoot, sourceRoot, dirname(dirname(node)), ...(browserRoot === undefined ? [] : [browserRoot])]
   const lines = [
-    '(version 1)', '(deny default)', '(deny network*)', '(allow process*)', '(allow sysctl-read)',
+    '(version 1)', browser === undefined ? '(deny default)' : '(allow default)', '(deny network*)',
+    '(allow process*)', '(allow sysctl-read)',
     '(allow file-read* (literal "/"))', '(allow file-read-metadata (literal "/tmp"))',
   ]
   for (const path of [...readable, runtime]) {
@@ -172,6 +173,12 @@ function sandboxProfile({ browser, forkRoot, node, runtime, sourceRoot }, ports)
     lines.push(`(allow network-outbound (remote tcp4 "localhost:${String(port)}"))`)
   }
   if (browser !== undefined) {
+    for (const path of [
+      protectedRoot,
+      '/Users/jinlong/.a2k', '/Users/jinlong/.aws', '/Users/jinlong/.config', '/Users/jinlong/.ssh',
+      '/Users/jinlong/Library/Application Support/Google/Chrome', '/Users/jinlong/Library/Keychains',
+      '/Users/jinlong/Desktop/Jinlong_project',
+    ]) lines.push(`(deny file-read* file-write* (subpath ${sbQuote(path)}))`)
     lines.push('(allow mach-lookup)')
     lines.push('(allow ipc-posix-shm)')
     lines.push('(allow ipc-posix-sem)')
@@ -209,7 +216,7 @@ function runChild(options, output) {
   const processHome = join(runtime, 'process-home')
   const temporary = join(runtime, 'tmp')
   for (const path of [osHome, workspace, processHome, temporary]) mkdirSync(path, { recursive: true, mode: 0o700 })
-  writeFileSync(profile, sandboxProfile({ ...options, runtime }, [options.hostPort, options.identityPort, options.modelPort]))
+  writeFileSync(profile, sandboxProfile({ ...options, protectedRoot, runtime }, [options.hostPort, options.identityPort, options.modelPort]))
   const argv = [
     '-f', profile, options.node, join(options.forkRoot, `lumx/probes/${options.suite}-probe.mjs`),
     '--source-root', options.sourceRoot, '--output', capture, '--os-home', osHome, '--workspace', workspace,
