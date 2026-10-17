@@ -35,7 +35,7 @@ changes:
 <a id="compatibility"></a>
 ## Compatibility
 
-Existing logs contain no external-engine binding and remain readable. The new ordinary event is written only by the external-engine factory before publishing its live Agent. Older readers may retain or ignore the unknown event under the Session event-envelope contract; they cannot resume the external engine without the new adapter.
+Existing logs contain no external-engine binding and remain readable. The new required ordinary event is written only by the external-engine factory before publishing its live Agent and omits the ignorable marker. An older reader whose known-event set lacks this type must refuse the log; it cannot ignore the binding or resume the external engine.
 
 <a id="verification"></a>
 ## Verification

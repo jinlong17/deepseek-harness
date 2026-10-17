@@ -35,7 +35,7 @@ changes:
 <a id="compatibility"></a>
 ## 兼容性
 
-现有日志不包含外部引擎绑定，仍可读取。这个新的普通事件只由外部引擎 factory 在发布 live Agent 之前写入。旧 reader 可按 Session event-envelope 合同保留或忽略未知事件；没有新 adapter 时不能恢复外部引擎。
+现有日志不包含外部引擎绑定，仍可读取。这个新的必需普通事件只由外部引擎 factory 在发布 live Agent 之前写入，并且不带 ignorable 标记。已知事件集合不含该类型的旧 reader 必须拒绝日志；它不能忽略该绑定或恢复外部引擎。
 
 <a id="verification"></a>
 ## 验证

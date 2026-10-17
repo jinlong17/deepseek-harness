@@ -276,6 +276,23 @@ test('dispose during validation rejects pending admission and causes zero provid
   assert.equal(relay.stats.forwarded, 0)
 })
 
+test('dispose settles validation that never resolves', async (t) => {
+  const upstream = await provider(t)
+  let startedResolve
+  const started = new Promise(resolve => { startedResolve = resolve })
+  const relay = await createAcpModelRelay({
+    engineId: 'qwen-0.24.0', getIdentity: () => identity, launchId: 'launch-never', model: 'synthetic-model',
+    providerEndpoint: upstream.endpoint, providerKey: 'provider-only-key', sessionId: 'session-never',
+    gateway: { validate: async () => { startedResolve(); return new Promise(() => {}) } },
+  })
+  const pending = relay.admit('prompt').catch(error => error)
+  await started
+  await relay.dispose()
+  assert.match((await pending).message, /disposed/)
+  assert.equal(upstream.requests.length, 0)
+  assert.equal(relay.stats.forwarded, 0)
+})
+
 test('operation admission is explicit and disposal revokes the launch capability', async (t) => {
   const { relay } = await fixture(t)
   assert.deepEqual(await relay.admit('create'), { operation: 'create', subject: 'user-42' })

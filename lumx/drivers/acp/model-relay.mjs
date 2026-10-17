@@ -6,6 +6,7 @@ import { admitLumxByok, LumxByokAdmissionError } from '../../identity/byok-admis
 
 const MAX_BODY_BYTES = 1024 * 1024
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+const ADMISSION_TIMEOUT_MS = 10_000
 const FORWARD_TIMEOUT_MS = 30_000
 
 function loopbackEndpoint(value, name) {
@@ -51,6 +52,18 @@ async function pipeResponse(upstream, response, signal) {
   response.end()
 }
 
+async function abortable(promise, signal) {
+  signal.throwIfAborted()
+  const aborted = Promise.withResolvers()
+  const onAbort = () => aborted.reject(signal.reason)
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    return await Promise.race([promise, aborted.promise])
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
+}
+
 /**
  * Product-owned, launch-scoped OpenAI-compatible model relay. Identity is
  * revalidated for every operation and every HTTP forwarding attempt.
@@ -66,7 +79,8 @@ export async function createAcpModelRelay(options) {
 
   const capability = `lumx-relay-${randomBytes(32).toString('base64url')}`
   const lifecycle = { accepting: true }
-  const active = new Set()
+  const activeAdmissions = new Set()
+  const activeForwards = new Set()
   const stats = { admittedOperations: 0, deniedOperations: 0, forwarded: 0, providerResponses: 0 }
 
   const admit = async (operation) => {
@@ -79,13 +93,23 @@ export async function createAcpModelRelay(options) {
       subject: identity.subject,
       type: identity.type,
     })
+    const admission = new AbortController()
+    const timer = setTimeout(() => admission.abort(new Error('LUMX ACP relay admission timed out')), ADMISSION_TIMEOUT_MS)
+    activeAdmissions.add(admission)
     let result
     try {
-      result = await admitLumxByok({ byokKey: options.providerKey, gateway: options.gateway, identity })
+      result = await abortable(
+        admitLumxByok({ byokKey: options.providerKey, gateway: options.gateway, identity }),
+        admission.signal,
+      )
     } catch (error) {
       stats.deniedOperations += 1
       if (error instanceof LumxByokAdmissionError) throw error
+      if (admission.signal.aborted) throw admission.signal.reason
       throw new LumxByokAdmissionError('identity_rejected')
+    } finally {
+      clearTimeout(timer)
+      activeAdmissions.delete(admission)
     }
     if (!lifecycle.accepting) throw new Error('LUMX ACP relay is disposed')
     const current = options.getIdentity()
@@ -117,7 +141,7 @@ export async function createAcpModelRelay(options) {
       const abortForward = () => controller.abort(new Error('relay client disconnected'))
       request.once('aborted', abortForward)
       response.once('close', () => { if (!response.writableEnded) abortForward() })
-      active.add(controller)
+      activeForwards.add(controller)
       stats.forwarded += 1
       try {
         const upstream = await fetch(providerEndpoint, {
@@ -132,7 +156,7 @@ export async function createAcpModelRelay(options) {
       } finally {
         clearTimeout(timer)
         request.off('aborted', abortForward)
-        active.delete(controller)
+        activeForwards.delete(controller)
       }
     } catch (error) {
       const code = error instanceof LumxByokAdmissionError ? error.code : 'relay_failure'
@@ -152,7 +176,8 @@ export async function createAcpModelRelay(options) {
   let disposal
   const dispose = () => (disposal ??= (async () => {
     lifecycle.accepting = false
-    for (const controller of active) controller.abort(new Error('relay disposed'))
+    for (const controller of activeAdmissions) controller.abort(new Error('relay disposed'))
+    for (const controller of activeForwards) controller.abort(new Error('relay disposed'))
     server.closeAllConnections?.()
     await new Promise((resolve, reject) => server.close(error => error === undefined ? resolve() : reject(error)))
   })())
