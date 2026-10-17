@@ -39,6 +39,21 @@ export const PRODUCT_PATCHES = Object.freeze([
       'node lumx/probes/live-host-probe.mjs --source-root <pinned-source> --output <capture>',
     ]),
   }),
+  Object.freeze({
+    files: Object.freeze([
+      'lumx/drivers/acp/model-relay.mjs',
+      'lumx/drivers/acp/qwen-feasibility.mjs',
+      'lumx/identity/byok-admission.mjs',
+    ]),
+    id: 'G9-1-P8',
+    purpose: 'Launch-scoped ACP model relay and non-canonical native Qwen create, prompt, cancel, and load-session feasibility groundwork.',
+    removal: 'Remove lumx/drivers/acp, restore the prior BYOK admission helper, and remove this registry entry to withdraw P8 groundwork.',
+    removalPaths: Object.freeze(['lumx/drivers/acp/', 'lumx/identity/byok-admission.mjs', 'lumx/patches/registry.mjs']),
+    tests: Object.freeze([
+      'node --test lumx/drivers/acp/*.test.mjs',
+      'node lumx/drivers/acp/qwen-feasibility.mjs <caller-anchored arguments>',
+    ]),
+  }),
 ])
 
 /** @returns {readonly object[]} */

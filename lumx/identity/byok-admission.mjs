@@ -37,7 +37,11 @@ export async function admitLumxByok(input) {
   } catch {
     throw new LumxByokAdmissionError('identity_rejected')
   }
-  if (!isVerifiedIdentity(verified, identity, now)) {
+  // For the runtime clock, expiry is checked again after the asynchronous
+  // gateway boundary. An injected clock remains stable for deterministic tests.
+  const finalNow = input.now ?? new Date()
+  if (expired(identity.expiresAt, finalNow)) throw new LumxByokAdmissionError('identity_expired')
+  if (!isVerifiedIdentity(verified, identity, finalNow)) {
     throw new LumxByokAdmissionError('identity_rejected')
   }
   return { subject: identity.subject }
