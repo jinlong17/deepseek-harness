@@ -16,17 +16,20 @@ consumer profile 的数据目录为 `<os-home>/.lumx`；developer profile 使用
 
 ```sh
 node --test lumx/desktop/launch-environment.test.mjs
+node --test lumx/desktop/native-host.test.mjs lumx/desktop/host-supervisor.test.mjs
 node --test lumx/identity/byok-admission.test.mjs
 node --test lumx/patches/registry.test.mjs
 ```
 
-产品补丁登记表目前包含两项（`G9-1-B1`、`G9-1-B2`），占桌面 12 项补丁预算中的两项。`lumx/runtime/launch.mjs` 通过 pinned `loadProfileDirectory` 和 `runProfile` 启动官方 DSH Web profile，应用七行隐私 overlay，并在真实的 `llm/stream` waterfall 上逐次检查 BYOK 身份。loopback adapter 只提供合成传输；其他已注册 provider 路由也通过同一登录检查。共享 Host、connection 和 SessionController 均为真实框架组件。这些私有发行配置与连接代码不会生成或认证完整的 Electron DesktopHost 包装、真实账号服务、签名链或产品发行物。
+产品补丁登记表目前包含四项（`G9-1-B1`、`G9-1-B2`、`G9-1-P8`、`G9-1-P3`），占桌面 12 项补丁预算中的四项。`lumx/runtime/launch.mjs` 现在通过已编译的原生 bootstrap、`sandbox-exec` 和全新的 pinned Node 进程启动官方 DSH Web profile。bootstrap 使用 `POSIX_SPAWN_SETEXEC | POSIX_SPAWN_CLOEXEC_DEFAULT`，只保留新的标准流。supervisor 保留身份和 provider 凭据；受限 Host 只收到一次启动范围内的模型 relay capability。公共 launcher 返回进程身份、限定控制和 shutdown，不返回进程内 Context。
 
-`lumx/probes/live-host-runner.mjs` 先验证 pinned source、Node 和 r3 artifacts，再在 Seatbelt 下启动合成 developer runtime，记录实际 token/cookie/Origin/Host 控制、BYOK 模型请求计数、重启及文件系统/文件描述符观测。它分别保存执行 argv、stdout、stderr、退出码、signal 和 timeout。资格检查失败时返回非零值。对抗性的继承文件描述符检查目前展示了实际缺口：受保护路径被拒绝，但已经打开并继承的文件描述符仍可读取。省略文件描述符只能验证 spawn 时未传递它，不能证明 OS 强制阻止文件描述符读取。
+`lumx/probes/native-host-boundary-probe.mjs` 从对抗性原生进程开始：降低文件描述符软限制后，其标准流、fd3、重复描述符和 fd512 都指向同一 canary。探针先用 `fstat` 和定位读取证明 canary 可读，再记录受支持 Host 及其全新子进程都无法恢复 canary；描述符编号被复用时，用 device、inode 和内容作区分。旧的直接 sandbox-to-Node 对照会刻意保留 fd3，因此仍然可读。探针还执行真实模型 turn、撤销身份后的拒绝且 provider I/O 为零、进程回收和 shutdown。
+
+`lumx/probes/live-host-runner.mjs` 保留为较早的 Lab runner，用于 pinned source、Node 和 r3 artifact 观测。其继承描述符结果描述旧的直接链，并作为历史证据保留；它不是受支持的 P3 launcher。
 
 runner 接受显式的 `--fork-root`、`--source-root`、`--node`、`--source-lock`、`--artifact-manifest`、`--output`、`--host-port`、`--identity-port` 和 `--model-port`。使用全新的输出目录及原始 pinned source/artifact manifest，并保留失败尝试。A2K G9-1 报告和冷证据记录准确命令、摘要及限制。所有探针均不使用真实 provider、凭据或网关。`lumx/probes/` 下仅用于 Lab 的 H1/ACP 能力驱动与产品补丁登记表分开，不构成完整 H1 产品。
 
 
 同一 runner 通过 `--suite live-cordis-ui --browser <verified-local-browser>` 选择官方渲染 UI/Cordis/ACP 持久化探针。该套件启动合成 browser profile，关闭真实预览提示，驱动官方 prompt/cancel 控件，并在 Host 重启前后检查持久化 ACP session identity。浏览器执行 profile 具有更广的本地 OS 权限，并显式拒绝凭据路径；它验证 UI 行为，不验证 deny-default Host 文件系统隔离。物理网络仍被拒绝，并接受实际测试。A/B 结果不能替代尚缺的完整 Electron 包装资格检查。
 
-`lumx/probes/h1-driver-runner.mjs` 使用通用的 source/runtime/manifest/output 参数，不接收 Host/model/identity 端口参数。它仅用于 Lab、基于真实 base 的 governed composition，记录实际限定范围的 tools、Gateway/Broker loopback HTTP body、两条拒绝路径、一次原生 tool call 拒绝，以及完整 turn 的重试计数。真实 ACP 正控 session 会在禁用 AgentLoop 的 new/resume 能力测试前完成持久化。它不注册或冒充外部 factory。三个组件拥有互不重叠的结果集合（Host:2、Cordis/UI:3、H1/driver:2）；A2K 的严格收据聚合器验证恰好七个原始 unit。产品补丁元数据仍为两个桌面条目，探针及其 Lab fixtures 不创建新的补丁预算池。
+`lumx/probes/h1-driver-runner.mjs` 使用通用的 source/runtime/manifest/output 参数，不接收 Host/model/identity 端口参数。它仅用于 Lab、基于真实 base 的 governed composition，记录实际限定范围的 tools、Gateway/Broker loopback HTTP body、两条拒绝路径、一次原生 tool call 拒绝，以及完整 turn 的重试计数。真实 ACP 正控 session 会在禁用 AgentLoop 的 new/resume 能力测试前完成持久化。它不注册或冒充外部 factory。三个原始组件拥有互不重叠的结果集合（Host:2、Cordis/UI:3、H1/driver:2）；A2K 的严格收据聚合器仍只验证这七个历史 unit。P3 和 P8 是另行登记的产品 groundwork，不改变这些历史结果。

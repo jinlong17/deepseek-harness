@@ -23,7 +23,7 @@ function loopbackEndpoint(value) {
 /**
  * Install memory-only identity and BYOK state for one runProfile composition.
  *
- * @param {{ runtimeId: string, byokKey: string, endpoint: string, gateway: object, getIdentity(): object | undefined, now?(): Date }} input
+ * @param {{ runtimeId: string, byokKey: string, endpoint: string, gateway?: object, getIdentity?(): object | undefined, now?(): Date, relayOnly?: boolean }} input
  */
 export function installLumxByokRuntime(input) {
   if (RUNTIMES.has(input.runtimeId)) throw new Error(`LUMX runtime already installed: ${input.runtimeId}`)
@@ -59,12 +59,14 @@ export async function apply(ctx, config) {
   ADMISSION_OBSERVATIONS.set(ctx.root ?? ctx, observations)
   ctx.on('llm/stream', async function * (_options, next) {
     try {
-      await admitLumxByok({
-        byokKey: state.byokKey,
-        gateway: state.gateway,
-        identity: state.getIdentity(),
-        now: state.now?.(),
-      })
+      if (!state.relayOnly) {
+        await admitLumxByok({
+          byokKey: state.byokKey,
+          gateway: state.gateway,
+          identity: state.getIdentity(),
+          now: state.now?.(),
+        })
+      }
       observations.push({ ordinal: observations.length + 1, result: 'admitted' })
     } catch (error) {
       observations.push({

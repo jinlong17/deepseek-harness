@@ -54,6 +54,32 @@ export const PRODUCT_PATCHES = Object.freeze([
       'node lumx/drivers/acp/qwen-feasibility.mjs <caller-anchored arguments>',
     ]),
   }),
+  Object.freeze({
+    files: Object.freeze([
+      'lumx/desktop/native/bootstrap.c',
+      'lumx/desktop/native/build.mjs',
+      'lumx/desktop/fd-observer.mjs',
+      'lumx/desktop/host-entry.mjs',
+      'lumx/desktop/host-profile.mjs',
+      'lumx/desktop/host-supervisor.mjs',
+      'lumx/runtime/internal-launch.mjs',
+      'lumx/runtime/launch.mjs',
+      'lumx/runtime/byok-plugin.mjs',
+    ]),
+    id: 'G9-1-P3',
+    purpose: 'Trusted native bootstrap, sandboxed fresh-process Host, descriptor closure, process lifecycle controls, and supervisor-owned BYOK relay wiring.',
+    removal: 'Remove the native Host modules, restore the in-process runtime launcher and BYOK wiring, and remove this registry entry to withdraw P3.',
+    removalPaths: Object.freeze([
+      'lumx/desktop/native/', 'lumx/desktop/fd-observer.mjs', 'lumx/desktop/host-entry.mjs',
+      'lumx/desktop/host-profile.mjs', 'lumx/desktop/host-supervisor.mjs',
+      'lumx/runtime/internal-launch.mjs', 'lumx/runtime/launch.mjs', 'lumx/runtime/byok-plugin.mjs',
+      'lumx/patches/registry.mjs',
+    ]),
+    tests: Object.freeze([
+      'node --test lumx/desktop/native-host.test.mjs lumx/desktop/host-supervisor.test.mjs',
+      'node lumx/probes/native-host-boundary-probe.mjs <native-harness arguments>',
+    ]),
+  }),
 ])
 
 /** @returns {readonly object[]} */

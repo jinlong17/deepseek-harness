@@ -3,5 +3,5 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write lumx/README.md
 /lumx-desktop-boundary-modules:
-  en: ec2d3caaee9d9103
-  zh: d6ab8d0d92734fdf
+  en: 4aa06eb27425a974
+  zh: 284befa055e2aede
