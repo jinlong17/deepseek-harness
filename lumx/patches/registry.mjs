@@ -5,6 +5,8 @@ export const PRODUCT_PATCHES = Object.freeze([
   Object.freeze({
     files: Object.freeze([
       'lumx/README.md',
+      'lumx/README.zh.md',
+      'lumx/README.i18n.yaml',
       'lumx/desktop/release-config.mjs',
       'lumx/desktop/launch-environment.mjs',
       'lumx/desktop/launch.mjs',
