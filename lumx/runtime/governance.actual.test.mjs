@@ -135,6 +135,22 @@ test('actual forbidden package is cache-discovered by non-governed guards and go
       import('../../vendor/cordis/lib/index.js'),
       import('../../vendor/loader/lib/index.js'),
     ])
+    const control = new Context()
+    let unguardedActivations = 0
+    let telemetryEmissions = 0
+    control.provide('deepseekAccount', { getDeviceIdentity: async () => undefined })
+    control.provide('webServer', {})
+    control.provide('productTelemetry', { emit() { telemetryEmissions += 1 } })
+    control.on('internal/plugin', (fiber) => {
+      if (fiber.runtime?.callback === discovered) unguardedActivations += 1
+    }, { global: true, prepend: true })
+    await control.plugin(discovered, { enabled: false, appVersion: 'network-denied-fixture' }).await()
+    assert.equal(unguardedActivations, 1)
+    assert(control.get('productAnalytics'))
+    assert.equal(telemetryEmissions, 0)
+    assert.equal(networkAttempts, 0)
+    await control.fiber.dispose()
+
     const nonGoverned = new Context()
     nonGoverned.baseUrl = runtime.ctx.loader.ctx.baseUrl
     await nonGoverned.plugin(Loader, { baseUrl: runtime.ctx.loader.ctx.baseUrl }).await()
