@@ -17,6 +17,19 @@ export interface Agent {
   readonly id: SessionId
 }
 
+/**
+ * Durable binding between one DSH agent and an externally owned engine session.
+ *
+ * This event is required and log-only. The engine adapter must append it before
+ * publishing the live Agent and must replay the exact binding when resuming.
+ */
+export interface ExternalEngineBinding {
+  readonly version: 1
+  readonly engineId: string
+  readonly nativeSessionId: string
+  readonly artifactIdentity: string
+}
+
 declare module '@deepseek-ai/dsh-workspace/types' {
   interface SessionActivityKindMap {
     /** The session's own Agent is inside a turn, including one waiting for an approval or an answer. */
@@ -88,6 +101,8 @@ export interface TurnBoundaryProjection {
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
+    /** Required external-engine binding committed before live Agent publication. */
+    'agent/external-engine-bound': ExternalEngineBinding
     /**
      * One normalized mutation of an agent's durable pending-message lists.
      * The session-projection registry applies the committed event before

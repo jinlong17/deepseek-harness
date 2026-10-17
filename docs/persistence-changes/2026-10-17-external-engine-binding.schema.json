@@ -1,0 +1,95 @@
+{
+  "formatVersion": 2,
+  "roots": [
+    {
+      "key": "event:agent/external-engine-bound",
+      "kind": "event",
+      "event": "agent/external-engine-bound",
+      "surface": false,
+      "digest": "1df7c13db919676cd85ae7f07457ea25b50f08dfb857f2a9e746ed557bf0f2fb",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "data",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "ignorable",
+                "type": 4,
+                "optional": true
+              },
+              {
+                "name": "seq",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "time",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "type",
+                "type": 6,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "artifactIdentity",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "engineId",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "nativeSessionId",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "version",
+                "type": 3,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "literal",
+            "value": 1
+          },
+          {
+            "kind": "literal",
+            "value": true
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "literal",
+            "value": "agent/external-engine-bound"
+          }
+        ]
+      }
+    }
+  ],
+  "types": []
+}

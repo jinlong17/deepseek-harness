@@ -21,6 +21,7 @@ The [format references](persistence-changes/historical-formats/README.md) cover 
 | `JsonlHeaderLine` | header | `18ee62b8900a4c3d046700f05d7a4d49d6cab2a660a020c87481d1603dd8bd4f` | [`HeaderLine`](#persistence-type-sha256-18ee62b8900a4c3d046700f05d7a4d49d6cab2a660a020c87481d1603dd8bd4f) |
 | `SessionEventEnvelope` | envelope | `5776e5553ff2dfe3f5bc202dbb1e7c9f93e35a531aebb7764c23b2b6153b2ccc` | [`union (3 variants)`](#persistence-type-sha256-5776e5553ff2dfe3f5bc202dbb1e7c9f93e35a531aebb7764c23b2b6153b2ccc) |
 | `event:agent-preset/selected` | event | `a10c17474eaf2ddab7095a099e0fe3d046fc18e56c3e344fc8894c05ff9ef97b` | [`{ type: "agent-preset/selected" }`](#persistence-type-sha256-a10c17474eaf2ddab7095a099e0fe3d046fc18e56c3e344fc8894c05ff9ef97b) |
+| `event:agent/external-engine-bound` | event | `1df7c13db919676cd85ae7f07457ea25b50f08dfb857f2a9e746ed557bf0f2fb` | [`{ type: "agent/external-engine-bound" }`](#persistence-type-sha256-1df7c13db919676cd85ae7f07457ea25b50f08dfb857f2a9e746ed557bf0f2fb) |
 | `event:agent/inbox/spliced` | event | `6178f1edcb23f361f2a6cb2c859b1c2187220d5695ece4a3400e0d92845a7178` | [`{ type: "agent/inbox/spliced" }`](#persistence-type-sha256-6178f1edcb23f361f2a6cb2c859b1c2187220d5695ece4a3400e0d92845a7178) |
 | `event:approval/asked` | event | `3bfeb47b58606f4661904bc723da612782214c463d01e6d61cd6d6193d7374e1` | [`{ type: "approval/asked" }`](#persistence-type-sha256-3bfeb47b58606f4661904bc723da612782214c463d01e6d61cd6d6193d7374e1) |
 | `event:approval/decided` | event | `bb1ab3d08f49a9f3b265f844cd78d5c49813062a7b34b54904b426f85d0ff6e3` | [`{ type: "approval/decided" }`](#persistence-type-sha256-bb1ab3d08f49a9f3b265f844cd78d5c49813062a7b34b54904b426f85d0ff6e3) |
@@ -161,6 +162,17 @@ Sources: [`packages/core/session/src/types.ts:431`](../packages/core/session/src
 
 ### `agent/*`
 
+<a id="agentexternal-engine-bound--log-only"></a>
+
+#### `agent/external-engine-bound` — log-only
+
+```ts persistence-catalog
+/** Required external-engine binding committed before live Agent publication. */
+'agent/external-engine-bound': ExternalEngineBinding
+```
+
+Source: [`packages/core/agent/src/types.ts:105`](../packages/core/agent/src/types.ts)
+
 <a id="agentinboxspliced--log-only"></a>
 
 #### `agent/inbox/spliced` — log-only
@@ -180,7 +192,7 @@ Sources: [`packages/core/session/src/types.ts:431`](../packages/core/session/src
 }
 ```
 
-Source: [`packages/core/agent/src/types.ts:96`](../packages/core/agent/src/types.ts)
+Source: [`packages/core/agent/src/types.ts:111`](../packages/core/agent/src/types.ts)
 
 ### `agent-preset/*`
 
@@ -1332,6 +1344,14 @@ SHA-256: `82470020b5bfcb1a843e2aa05602af7d37df99e82d01f015c7c589ba054fd89d`
 SHA-256: `557e148d30b79ee48645850832b30c717d7c3b64641deb5d6133b8b4e91ee0b8`
 
 `"agent-preset/selected"`
+
+<a id="persistence-type-sha256-f07bb15e575a58e0f0d030648c224b0e407be976c0cb6ebaf544656146dac585"></a>
+
+### `"agent/external-engine-bound"`
+
+SHA-256: `f07bb15e575a58e0f0d030648c224b0e407be976c0cb6ebaf544656146dac585`
+
+`"agent/external-engine-bound"`
 
 <a id="persistence-type-sha256-829a2fb3be6efd4ba36aef8ed2d381a4c6fb2a0aaf50c823a6f3f8290786b809"></a>
 
@@ -3284,6 +3304,25 @@ Sources: [`packages/schedule/schedule/src/types.ts:244`](../packages/schedule/sc
 | `operation` | required | `"dispatch"` |
 | `version` | required | `1` |
 
+<a id="persistence-type-sha256-eafd3e1ad7d6ad970dd8f08cbbeb52a6e4e15ca19fcb15ca99f1173d091bb668"></a>
+
+<a id="persistence-type-externalenginebinding"></a>
+
+<a id="persistence-type-packagescoreagentsrctypestsexternalenginebinding"></a>
+
+### `ExternalEngineBinding`
+
+SHA-256: `eafd3e1ad7d6ad970dd8f08cbbeb52a6e4e15ca19fcb15ca99f1173d091bb668`
+
+Sources: [`packages/core/agent/src/types.ts:26`](../packages/core/agent/src/types.ts)
+
+| Property | Presence | Type |
+|---|---|---|
+| `artifactIdentity` | required | `string` |
+| `engineId` | required | `string` |
+| `nativeSessionId` | required | `string` |
+| `version` | required | `1` |
+
 <a id="persistence-type-sha256-7d54a5a5e629e2e7783bfac72683bcc5e969e9f43426b9289826aaf294ff6344"></a>
 
 <a id="persistence-type-feedbackrecord"></a>
@@ -3646,7 +3685,7 @@ Array of [`ImageOffloadTarget`](#persistence-type-sha256-1cde1bedde79c5e8a56aee9
 
 SHA-256: `96f4a9c81fc0f940ef71528a8cc66731ae4cf1f40d79680c5fe3c39f96d7723c`
 
-Sources: [`packages/core/agent/src/types.ts:39`](../packages/core/agent/src/types.ts)
+Sources: [`packages/core/agent/src/types.ts:52`](../packages/core/agent/src/types.ts)
 
 One of:
 
@@ -6091,7 +6130,7 @@ Sources: [`packages/core/session/src/types.ts:427`](../packages/core/session/src
 
 SHA-256: `149c5a77529cb0dc06f5ceb6273069b7606174d1e7893b5f9b1071c15306b846`
 
-Sources: [`packages/core/agent/src/types.ts:96`](../packages/core/agent/src/types.ts)
+Sources: [`packages/core/agent/src/types.ts:111`](../packages/core/agent/src/types.ts)
 
 | Property | Presence | Type |
 |---|---|---|
@@ -7642,6 +7681,22 @@ SHA-256: `a10c17474eaf2ddab7095a099e0fe3d046fc18e56c3e344fc8894c05ff9ef97b`
 | `seq` | required | `number` |
 | `time` | required | `number` |
 | `type` | required | `"agent-preset/selected"` |
+
+<a id="persistence-type-sha256-1df7c13db919676cd85ae7f07457ea25b50f08dfb857f2a9e746ed557bf0f2fb"></a>
+
+<a id="persistence-type-eventagentexternal-engine-bound"></a>
+
+### `{ type: "agent/external-engine-bound" }`
+
+SHA-256: `1df7c13db919676cd85ae7f07457ea25b50f08dfb857f2a9e746ed557bf0f2fb`
+
+| Property | Presence | Type |
+|---|---|---|
+| `data` | required | [`ExternalEngineBinding`](#persistence-type-sha256-eafd3e1ad7d6ad970dd8f08cbbeb52a6e4e15ca19fcb15ca99f1173d091bb668) |
+| `ignorable` | optional | `true` |
+| `seq` | required | `number` |
+| `time` | required | `number` |
+| `type` | required | `"agent/external-engine-bound"` |
 
 <a id="persistence-type-sha256-6178f1edcb23f361f2a6cb2c859b1c2187220d5695ece4a3400e0d92845a7178"></a>
 

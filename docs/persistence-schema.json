@@ -402,6 +402,95 @@
       }
     },
     {
+      "key": "event:agent/external-engine-bound",
+      "kind": "event",
+      "event": "agent/external-engine-bound",
+      "surface": false,
+      "digest": "1df7c13db919676cd85ae7f07457ea25b50f08dfb857f2a9e746ed557bf0f2fb",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "data",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "ignorable",
+                "type": 4,
+                "optional": true
+              },
+              {
+                "name": "seq",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "time",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "type",
+                "type": 6,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "artifactIdentity",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "engineId",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "nativeSessionId",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "version",
+                "type": 3,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "literal",
+            "value": 1
+          },
+          {
+            "kind": "literal",
+            "value": true
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "literal",
+            "value": "agent/external-engine-bound"
+          }
+        ]
+      }
+    },
+    {
       "key": "event:agent/inbox/spliced",
       "kind": "event",
       "event": "agent/inbox/spliced",
@@ -22081,7 +22170,7 @@
       "digest": "149c5a77529cb0dc06f5ceb6273069b7606174d1e7893b5f9b1071c15306b846",
       "names": [],
       "sources": [
-        "packages/core/agent/src/types.ts:96"
+        "packages/core/agent/src/types.ts:111"
       ]
     },
     {
@@ -22272,6 +22361,11 @@
       "sources": [
         "packages/goal/goal/src/domain.ts:24"
       ]
+    },
+    {
+      "digest": "1df7c13db919676cd85ae7f07457ea25b50f08dfb857f2a9e746ed557bf0f2fb",
+      "names": [],
+      "sources": []
     },
     {
       "digest": "1e0b0b66b6f0c53fc72e52289d06b4708d776f1ca9df4c86a22bff621d403cf0",
@@ -24003,7 +24097,7 @@
         "packages/core/agent/src/types.ts#InboxTarget"
       ],
       "sources": [
-        "packages/core/agent/src/types.ts:39"
+        "packages/core/agent/src/types.ts:52"
       ]
     },
     {
@@ -25118,6 +25212,15 @@
       ]
     },
     {
+      "digest": "eafd3e1ad7d6ad970dd8f08cbbeb52a6e4e15ca19fcb15ca99f1173d091bb668",
+      "names": [
+        "packages/core/agent/src/types.ts#ExternalEngineBinding"
+      ],
+      "sources": [
+        "packages/core/agent/src/types.ts:26"
+      ]
+    },
+    {
       "digest": "ebb768d85ec87fb68e42fc14fd7d8535b5ac11791b14d04c6770180f0a719bf8",
       "names": [],
       "sources": []
@@ -25173,6 +25276,11 @@
     },
     {
       "digest": "f05fb85e715af4ab4de0b6ba111166dd0435bd8bb74a0fa0f32b9d174113fc7c",
+      "names": [],
+      "sources": []
+    },
+    {
+      "digest": "f07bb15e575a58e0f0d030648c224b0e407be976c0cb6ebaf544656146dac585",
       "names": [],
       "sources": []
     },
