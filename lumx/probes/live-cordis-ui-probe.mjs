@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, readSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { connect } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -39,6 +40,23 @@ function argumentsOf(argv) {
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
+}
+
+function deniedNetworkAttempt() {
+  return new Promise(resolveAttempt => {
+    const socket = connect({ host: '198.51.100.1', port: 9 })
+    const timeout = setTimeout(() => { socket.destroy(); resolveAttempt({ code: 'timeout', denied: false }) }, 2_000)
+    socket.once('connect', () => { clearTimeout(timeout); socket.destroy(); resolveAttempt({ code: 'connected', denied: false }) })
+    socket.once('error', error => { clearTimeout(timeout); resolveAttempt({ code: error.code ?? error.name, denied: error.code === 'EPERM' }) })
+  })
+}
+
+function isolationCanaries() {
+  let pathDenied = false
+  let fdDenied = false
+  try { readFileSync(process.env.LUMX_CANARY_PATH) } catch { pathDenied = true }
+  try { readSync(Number(process.env.LUMX_CANARY_FD), Buffer.alloc(1), 0, 1, 0) } catch { fdDenied = true }
+  return { fdDenied, pathDenied }
 }
 
 function serverAt(port, handler) {
@@ -185,6 +203,7 @@ async function createBrowserState(options, runtime) {
     args: [
       '--no-sandbox', '--disable-gpu', '--disable-background-networking', '--disable-component-update',
       '--disable-default-apps', '--disable-sync', '--metrics-recording-only', '--no-first-run',
+      '--disable-breakpad', '--disable-crash-reporter', '--disable-crashpad',
     ],
   })
   const page = context.pages()[0] ?? await context.newPage()
@@ -234,6 +253,9 @@ async function execute(options, capture) {
     credential: 'synthetic-identity', expiresAt: '2026-10-18T12:01:00.000Z',
     subject: 'synthetic-user', type: 'lumx.local-auth.v1',
   }
+  const network = await deniedNetworkAttempt()
+  const isolation = isolationCanaries()
+  capture.observations = { isolation, network }
   const identityStub = await serverAt(options.identityPort, async (incoming, response) => {
     identityRequests += 1
     const body = await jsonBody(incoming)
@@ -284,6 +306,7 @@ async function execute(options, capture) {
       sourceRoot: options.sourceRoot, port: options.hostPort, auth, environment: {},
     })
     const privacy = await exercisePrivacyLifecycle(runtime)
+    capture.observations.privacy = { ...privacy, finalEntries: undefined }
     browser = await createBrowserState(options, runtime)
     const beforeRestart = await openingSnapshot(runtime.ctx, browser.durable.sessionId)
     await runtime.shutdown()
@@ -321,6 +344,9 @@ async function execute(options, capture) {
     const uiCancelPass = browser.apiRequests.includes('/api/session/cancel') && cancelledModelConnections >= 1
     const uiRenderPass = browser.initialRender.prompt > 0 && browser.initialRender.response > 0 && renderedAfterRestart
     const checks = [
+      check('physical-network-denied', network.denied === true, network),
+      check('main-profile-path-denied', isolation.pathDenied === true, isolation),
+      check('inherited-fd-read-denied', isolation.fdDenied === true, isolation),
       check('privacy-seven-resolved-disabled-no-fiber', disabledPass, { presentIds, missingIds, initial: privacy.initial, final: privacy.final }),
       check('privacy-safe-update-remove-reinstall', lifecyclePass, privacy.actions),
       check('privacy-late-reenable-rejected', false, { executed: false, reason: 'forbidden rows were never re-enabled; no product guard rejects an attempted re-enable' }),
@@ -350,7 +376,7 @@ async function execute(options, capture) {
         bodyBytes: Buffer.byteLength(body), bodySha256: sha256(body), consoleErrors: browser.consoleErrors,
         pageErrors: browser.pageErrors, apiRequests: browser.apiRequests,
       },
-      identityRequests, modelRequests, privacy: { ...privacy, finalEntries: undefined },
+      identityRequests, isolation, modelRequests, network, privacy: { ...privacy, finalEntries: undefined },
       session: { beforeRestart, afterRestart, id: browser.durable.sessionId },
     }
     capture.checks = checks

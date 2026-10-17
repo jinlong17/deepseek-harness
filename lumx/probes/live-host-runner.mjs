@@ -174,6 +174,8 @@ function sandboxProfile({ browser, forkRoot, node, runtime, sourceRoot }, ports)
   if (browser !== undefined) {
     lines.push('(allow mach-lookup)')
     lines.push('(allow ipc-posix-shm)')
+    const tempRoot = dirname(runtime).replaceAll('\\', '\\\\').replaceAll('.', '\\.')
+    lines.push(`(allow file-read* file-write* (regex #"^${tempRoot}/\\.org\\.chromium\\.Chromium\\.[^/]+(/.*)?$"))`)
   }
   return `${[...new Set(lines)].join('\n')}\n`
 }
