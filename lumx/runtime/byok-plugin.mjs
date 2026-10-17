@@ -27,12 +27,6 @@ export function installLumxByokRuntime(input) {
 }
 
 async function modelReply(state, options) {
-  await admitLumxByok({
-    byokKey: state.byokKey,
-    gateway: state.gateway,
-    identity: state.getIdentity(),
-    now: state.now?.(),
-  })
   const response = await fetch(state.endpoint, {
     body: JSON.stringify({ messages: options.messages, model: options.model }),
     headers: { authorization: `Bearer ${state.byokKey}`, 'content-type': 'application/json' },
@@ -55,6 +49,15 @@ export const inject = ['llm']
 export async function apply(ctx, config) {
   const state = RUNTIMES.get(config.runtimeId)
   if (state === undefined) throw new Error('LUMX BYOK runtime state is unavailable')
+  ctx.on('llm/stream', async function * (_options, next) {
+    await admitLumxByok({
+      byokKey: state.byokKey,
+      gateway: state.gateway,
+      identity: state.getIdentity(),
+      now: state.now?.(),
+    })
+    yield * next()
+  }, { global: true, prepend: true })
   const llmModule = await import(pathToFileURL(join(config.sourceRoot, 'packages/llm/llm/lib/index.js')).href)
   class LumxLoopbackAdapter extends llmModule.LlmAdapter {
     providerInfo(provider) { return { id: provider, name: 'LUMX BYOK' } }

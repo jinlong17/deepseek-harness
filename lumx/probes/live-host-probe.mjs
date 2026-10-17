@@ -4,7 +4,8 @@ import { readFileSync, readSync } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
 import { connect } from 'node:net'
 import { writeFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { createLoopbackIdentityGateway } from '../identity/loopback-gateway.mjs'
 import { launchLumxRuntime } from '../runtime/launch.mjs'
@@ -71,6 +72,45 @@ async function sessionAttempt(runtime, id, prompt) {
     eventTypes: events.map(event => event.type),
     failures: events.filter(event => event.type === 'assistant/attempt').map(event => event.data.failure),
     sessionId: created.sessionId,
+  }
+}
+
+async function alternateAdapterAttempts(runtime, sourceRoot, setIdentity) {
+  const llmModule = await import(pathToFileURL(join(sourceRoot, 'packages/llm/llm/lib/index.js')).href)
+  let adapterCalls = 0
+  class AlternateAdapter extends llmModule.LlmAdapter {
+    providerInfo(provider) { return { id: provider, name: 'LUMX alternate route probe' } }
+    listModels(provider) { return Promise.resolve([{ provider, id: 'alternate', name: 'Alternate' }]) }
+    resolveModel(provider, model) { return Promise.resolve({ provider, id: model, name: 'Alternate' }) }
+    async * stream() {
+      adapterCalls += 1
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  const release = runtime.ctx.llm.registerAdapter(['lumx-alternate-probe'], new AlternateAdapter())
+  const invoke = async () => {
+    const chunks = []
+    let error
+    try {
+      for await (const chunk of runtime.ctx.llm.stream({
+        provider: 'lumx-alternate-probe', model: 'alternate', messages: [],
+      })) chunks.push(chunk)
+    } catch (caught) {
+      error = { code: caught?.code, message: caught?.message, name: caught?.name }
+    }
+    return { adapterCalls, chunks, error }
+  }
+  try {
+    setIdentity(undefined)
+    const anonymous = await invoke()
+    setIdentity({
+      credential: 'synthetic-identity', expiresAt: '2026-10-18T12:01:00.000Z',
+      subject: 'synthetic-user', type: 'lumx.local-auth.v1',
+    })
+    const admitted = await invoke()
+    return { admitted, anonymous }
+  } finally {
+    release()
   }
 }
 
@@ -187,6 +227,8 @@ async function execute(options, capture) {
       cookie, host: authority,
     })
 
+    const alternateAdapter = await alternateAdapterAttempts(runtime, options.sourceRoot, value => { identity = value })
+
     let before = modelRequests
     const anonymous = await sessionAttempt(runtime, 'lumx-anonymous', 'anonymous must not call model')
     const anonymousModelRequests = modelRequests - before
@@ -245,6 +287,7 @@ async function execute(options, capture) {
       isolation,
       modelRequests,
       network,
+      alternateAdapter,
       runtime: {
         baseUrl: restarted.baseUrl,
         pid: restarted.pid,
@@ -283,6 +326,10 @@ async function execute(options, capture) {
       ['byok-subject-mismatch-zero-model', subjectMismatchModelRequests === 0, { modelRequests: subjectMismatchModelRequests }],
       ['byok-expired-zero-model', expiredModelRequests === 0, { modelRequests: expiredModelRequests }],
       ['byok-revoked-zero-model', revokedModelRequests === 0, { modelRequests: revokedModelRequests }],
+      ['byok-other-adapter-anonymous-blocked', alternateAdapter.anonymous.adapterCalls === 0
+        && alternateAdapter.anonymous.error?.name === 'LumxByokAdmissionError', alternateAdapter.anonymous],
+      ['byok-other-adapter-positive', alternateAdapter.admitted.adapterCalls === 1
+        && alternateAdapter.admitted.chunks.at(-1)?.type === 'finish', alternateAdapter.admitted],
       ['byok-positive-model-response', positiveModelRequests === 1
         && positive.assistantText.startsWith('LUMX synthetic response: ') && positive.assistantText.length > 25,
       { assistantTextBytes: positive.assistantText.length, modelRequests: positiveModelRequests }],
@@ -318,6 +365,7 @@ async function execute(options, capture) {
           byId.get('byok-wrong-type-zero-model'), byId.get('byok-invalid-expiry-zero-model'),
           byId.get('byok-equal-expiry-zero-model'), byId.get('byok-subject-mismatch-zero-model'),
           byId.get('byok-expired-zero-model'), byId.get('byok-revoked-zero-model'),
+          byId.get('byok-other-adapter-anonymous-blocked'), byId.get('byok-other-adapter-positive'),
         ],
       },
       {
