@@ -63,7 +63,14 @@ export async function apply(ctx, config) {
   const llm = await import(pathToFileURL(join(config.sourceRoot, 'packages/llm/llm/lib/index.js')).href)
 
   class H1ControlledAdapter extends llm.LlmAdapter {
+    retryPolicy = llm.resolveRetryPolicy({
+      mode: 'normal',
+      maxRetries: 1,
+      retryableCodes: ['SERVER'],
+      backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+    }, 'LUMX H1 controlled retry policy')
     providerInfo(provider) { return { id: provider, name: 'LUMX H1 controlled model' } }
+    providerRetryPolicy() { return this.retryPolicy }
     listModels(provider) {
       return Promise.resolve([{ provider, id: 'h1-controlled', name: 'H1 controlled', inputModalities: ['text'] }])
     }
@@ -86,7 +93,10 @@ export async function apply(ctx, config) {
         tools: request.tools,
       }, options.signal)
       if (!response.ok) {
-        throw new Error(`LUMX H1 loopback model gateway rejected the request (${String(response.status)})`)
+        throw new llm.LlmError(
+          `LUMX H1 loopback model gateway rejected the request (${String(response.status)})`,
+          response.status >= 500 ? 'SERVER' : 'UNKNOWN',
+        )
       }
       const reply = await response.json()
       if (reply?.type === 'tool-call' && typeof reply.id === 'string'

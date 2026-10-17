@@ -104,24 +104,40 @@ async function createH1LoopbackStubs(nativeCanaryPath) {
   const wire = { broker: [], model: [] }
   let brokerScenarioOrdinal = 0
   let nativeScenarioOrdinal = 0
+  let retryScenarioOrdinal = 0
   const model = await listenLoopback(async (request, response) => {
     const body = await jsonBody(request)
     const messages = JSON.stringify(body.messages)
     const gatewayRefusal = messages.includes('gateway-refusal')
     const nativeToolNegative = messages.includes('native-tool-negative')
+    const retryPositive = messages.includes('retry-positive')
     const scenario = gatewayRefusal ? 'gateway-refusal'
-      : nativeToolNegative ? 'native-tool-negative' : 'broker-refusal'
+      : nativeToolNegative ? 'native-tool-negative'
+        : retryPositive ? 'retry-positive' : 'broker-refusal'
+    if (retryPositive) retryScenarioOrdinal += 1
+    const responseStatus = gatewayRefusal ? 403
+      : retryPositive && retryScenarioOrdinal === 1 ? 503 : 200
     const record = {
       body,
       method: request.method,
       path: request.url,
-      responseStatus: gatewayRefusal ? 403 : 200,
+      responseStatus,
       scenario,
     }
     wire.model.push(record)
     if (gatewayRefusal) {
       response.writeHead(403, { 'content-type': 'application/json' })
       response.end(JSON.stringify({ error: 'controlled model gateway refusal' }))
+      return
+    }
+    if (retryPositive && retryScenarioOrdinal === 1) {
+      response.writeHead(503, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ error: 'controlled transient model gateway outage' }))
+      return
+    }
+    if (retryPositive) {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ type: 'text', text: 'Retry detector positive control recovered.' }))
       return
     }
     if (nativeToolNegative) {
@@ -252,6 +268,14 @@ async function runH1(options) {
     }))
     await withDeadline('H1 model-gateway-refusal turn', gatewayHandle.agent.whenIdle())
     observation.phase = 'gateway-turn-complete'
+    const retryHandle = await createAgent('lumx-h1-retry-positive')
+    handles.push(retryHandle)
+    retryHandle.agent.followup(llm.createUserMessage({
+      content: [{ type: 'text', text: 'retry-positive: recover from one controlled transient Gateway failure.' }],
+      source: { kind: 'user' },
+    }))
+    await withDeadline('H1 retry-positive turn', retryHandle.agent.whenIdle())
+    observation.phase = 'retry-positive-turn-complete'
     const nativeHandle = await createAgent('lumx-h1-native-tool-negative')
     handles.push(nativeHandle)
     nativeHandle.agent.followup(llm.createUserMessage({
@@ -262,14 +286,18 @@ async function runH1(options) {
     observation.phase = 'turns-complete'
     const brokerEvents = brokerHandle.agent.session.snapshotEvents()
     const gatewayEvents = gatewayHandle.agent.session.snapshotEvents()
+    const retryEvents = retryHandle.agent.session.snapshotEvents()
     const nativeEvents = nativeHandle.agent.session.snapshotEvents()
     const state = runtime.snapshot()
     const brokerRetryEvents = brokerEvents.filter(event => event.type === 'llm/retry' || event.type === 'llm/retry-started')
     const gatewayRetryEvents = gatewayEvents.filter(event => event.type === 'llm/retry' || event.type === 'llm/retry-started')
+    const retryScheduledEvents = retryEvents.filter(event => event.type === 'llm/retry')
+    const retryStartedEvents = retryEvents.filter(event => event.type === 'llm/retry-started')
     const nativeRetryEvents = nativeEvents.filter(event => event.type === 'llm/retry' || event.type === 'llm/retry-started')
     const brokerRefusalEvents = brokerEvents.filter(event => event.type === 'tool/result' && event.data.message.isError === true)
     const brokerTurnEnds = brokerEvents.filter(event => event.type === 'turn/end')
     const gatewayTurnEnds = gatewayEvents.filter(event => event.type === 'turn/end')
+    const retryTurnEnds = retryEvents.filter(event => event.type === 'turn/end')
     const gatewayFailures = gatewayEvents.filter(event => event.type === 'assistant/attempt')
     const nativeCalls = nativeEvents.filter(event => event.type === 'tool/call' && event.data.name === 'bash')
     const nativeRefusals = nativeEvents.filter(event => event.type === 'tool/result'
@@ -281,6 +309,7 @@ async function runH1(options) {
     const wireRequestToolNames = stubs.wire.model.map(request => request.body.tools.map(row => row.name))
     const brokerModelWire = stubs.wire.model.filter(request => request.scenario === 'broker-refusal')
     const gatewayModelWire = stubs.wire.model.filter(request => request.scenario === 'gateway-refusal')
+    const retryModelWire = stubs.wire.model.filter(request => request.scenario === 'retry-positive')
     const nativeModelWire = stubs.wire.model.filter(request => request.scenario === 'native-tool-negative')
     const loaderEntries = [...runtime.ctx.loader.entries()]
     const nativeLoaderEntry = loaderEntries.find(candidate => candidate.options.id === 'tool-bash')
@@ -343,6 +372,16 @@ async function runH1(options) {
       subcheck('model-gateway-retry-count', gatewayRetryEvents.length === 0,
         { count: gatewayRetryEvents.length, events: gatewayRetryEvents },
         'the complete model Gateway refusal turn emitted an unexpected retry'),
+      subcheck('retry-detector-positive-control', retryScheduledEvents.length === 1
+        && retryStartedEvents.length === 1,
+      { scheduled: retryScheduledEvents, started: retryStartedEvents },
+      'the real llm-retry composition did not schedule and start exactly one retry'),
+      subcheck('retry-positive-model-io', retryModelWire.length === 2
+        && retryModelWire[0].responseStatus === 503
+        && retryModelWire[1].responseStatus === 200,
+      retryModelWire, 'the retry positive control did not preserve the actual 503 then success wire attempts'),
+      subcheck('retry-positive-turn-completed', retryTurnEnds.length === 1,
+        retryTurnEnds, 'the retry positive control did not reach a durable turn/end'),
       subcheck('native-tool-row-disabled', nativeLoaderEntry !== undefined
         && nativeLoaderEntry.disabled === true && nativeLoaderEntry.fiber === undefined,
       nativeLoaderEntry === undefined ? { id: 'tool-bash', resolved: false } : {
@@ -382,6 +421,8 @@ async function runH1(options) {
         physicalNetwork,
         preparationFailure,
         privacyRows,
+        retryEventTypes: retryEvents.map(event => event.type),
+        retryPositiveCount: retryScheduledEvents.length,
         wire: stubs.wire,
       },
       counted: unit('real/H1-inventory', subchecks,

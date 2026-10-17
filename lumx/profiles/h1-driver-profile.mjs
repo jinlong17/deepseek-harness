@@ -37,7 +37,6 @@ const DISABLED_ROWS = [
   'tool-subagent-list-agents',
   'tool-subagent',
   'tool-subagent-fork',
-  'llm-retry',
   'tool-plugin-manager',
   'plugin-manager',
   ...PRIVACY_ROWS,
