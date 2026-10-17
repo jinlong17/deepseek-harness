@@ -21,7 +21,7 @@ node --test lumx/identity/byok-admission.test.mjs
 node --test lumx/patches/registry.test.mjs
 ```
 
-产品补丁登记表目前包含四项（`G9-1-B1`、`G9-1-B2`、`G9-1-P8`、`G9-1-P3`），占桌面 12 项补丁预算中的四项。`lumx/runtime/launch.mjs` 现在通过已编译的原生 bootstrap、`sandbox-exec` 和全新的 pinned Node 进程启动官方 DSH Web profile。bootstrap 使用 `POSIX_SPAWN_SETEXEC | POSIX_SPAWN_CLOEXEC_DEFAULT`，只保留新的标准流。supervisor 保留身份和 provider 凭据；受限 Host 只收到一次启动范围内的模型 relay capability。公共 launcher 返回进程身份、限定控制和 shutdown，不返回进程内 Context。
+产品补丁登记表目前包含八项，占桌面 12 项补丁预算中的八项。P7 增加三个产品自有 consumer：本地 platform-stub、desktop BYOK 和 governed H1 composition。三者都会在 profile entry 挂载前安装同一个根生命周期的七行隐私策略；platform-stub 只记录本地资格，不宣称存在 platform gateway。受支持的 Host payload 按名称选择 desktop BYOK 或 platform-stub；stub 不启动 model relay。governed H1 是产品自有组合，但目前仅通过非 canonical 的进程内资格 launcher 观察，因此不用于验证 native Host boundary。`lumx/runtime/launch.mjs` 现在通过已编译的原生 bootstrap、`sandbox-exec` 和全新的 pinned Node 进程启动官方 DSH Web profile。bootstrap 使用 `POSIX_SPAWN_SETEXEC | POSIX_SPAWN_CLOEXEC_DEFAULT`，只保留新的标准流。supervisor 保留身份和 provider 凭据；受限 Host 只收到一次启动范围内的模型 relay capability。公共 launcher 返回进程身份、限定控制和 shutdown，不返回进程内 Context。
 
 `lumx/probes/native-host-boundary-probe.mjs` 从对抗性原生进程开始：降低文件描述符软限制后，其标准流、fd3、重复描述符和 fd512 都指向同一 canary。探针先用 `fstat` 和定位读取证明 canary 可读，再记录受支持 Host 及其全新子进程都无法恢复 canary；描述符编号被复用时，用 device、inode 和内容作区分。旧的直接 sandbox-to-Node 对照会刻意保留 fd3，因此仍然可读。探针还执行真实模型 turn、撤销身份后的拒绝且 provider I/O 为零、进程回收和 shutdown。
 
@@ -32,4 +32,4 @@ runner 接受显式的 `--fork-root`、`--source-root`、`--node`、`--source-lo
 
 同一 runner 通过 `--suite live-cordis-ui --browser <verified-local-browser>` 选择官方渲染 UI/Cordis/ACP 持久化探针。该套件启动合成 browser profile，关闭真实预览提示，驱动官方 prompt/cancel 控件，并在 Host 重启前后检查持久化 ACP session identity。浏览器执行 profile 具有更广的本地 OS 权限，并显式拒绝凭据路径；它验证 UI 行为，不验证 deny-default Host 文件系统隔离。物理网络仍被拒绝，并接受实际测试。A/B 结果不能替代尚缺的完整 Electron 包装资格检查。
 
-`lumx/probes/h1-driver-runner.mjs` 使用通用的 source/runtime/manifest/output 参数，不接收 Host/model/identity 端口参数。它仅用于 Lab、基于真实 base 的 governed composition，记录实际限定范围的 tools、Gateway/Broker loopback HTTP body、两条拒绝路径、一次原生 tool call 拒绝，以及完整 turn 的重试计数。真实 ACP 正控 session 会在禁用 AgentLoop 的 new/resume 能力测试前完成持久化。它不注册或冒充外部 factory。三个原始组件拥有互不重叠的结果集合（Host:2、Cordis/UI:3、H1/driver:2）；A2K 的严格收据聚合器仍只验证这七个历史 unit。P3 和 P8 是另行登记的产品 groundwork，不改变这些历史结果。
+`lumx/probes/h1-driver-runner.mjs` 使用通用的 source/runtime/manifest/output 参数，不接收 Host/model/identity 端口参数。它观察产品 governed-H1 composition，而不导入 Lab H1 adapter：字面量 loopback model/Broker adapter 只暴露 `lumx_broker`，每个 root、child 或 resumed Agent 都会在发布前得到 scoped allowlist，独立的全局单调执行 guard 拒绝原生工具。探针记录实际 scoped tools、Gateway/Broker loopback HTTP body、重试及拒绝结果和原生 canary 状态。真实 ACP 正控 session 会在禁用 AgentLoop 的 new/resume 能力测试前完成持久化。它不注册或冒充外部 factory。三个原始组件拥有互不重叠的结果集合（Host:2、Cordis/UI:3、H1/driver:2）；A2K 的严格收据聚合器仍只验证这七个历史 unit。P3、P7 和 P8 是另行登记的产品工作，不改变这些历史结果。

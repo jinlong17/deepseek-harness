@@ -49,6 +49,9 @@ const configBytes = readFileSync(configPath)
 const config = JSON.parse(configBytes)
 if (config.version !== 1 || config.configSha256 !== sha256(Buffer.from(JSON.stringify(config.payload)))) throw new Error('Host configuration digest mismatch')
 const input = config.payload
+if (input.consumer !== 'desktop-byok' && input.consumer !== 'platform-stub') {
+  throw new Error('Host configuration consumer is invalid')
+}
 let runtime
 let stopping
 const shutdown = () => (stopping ??= (async () => {
@@ -87,12 +90,15 @@ try {
     try { readFileSync(path); protectedPathErrors[path] = 'READABLE' } catch (error) { protectedPathErrors[path] = error.code ?? error.name }
   }
   runtime = await launchLumxRuntimeInProcess({
-    mode: input.mode, osHome: input.osHome, workspaceDirectory: input.workspaceDirectory,
+    consumer: input.consumer, mode: input.mode, osHome: input.osHome, workspaceDirectory: input.workspaceDirectory,
     sourceRoot: input.sourceRoot, port: input.port, environment: input.environment,
-    auth: { byokKey: input.relayCapability, endpoint: input.modelEndpoint, relayOnly: true },
+    ...input.consumer === 'desktop-byok' ? {
+      auth: { byokKey: input.relayCapability, endpoint: input.modelEndpoint, relayOnly: true },
+    } : {},
   })
   process.stdout.write(`${JSON.stringify({
     type: 'ready', pid: process.pid, baseUrl: runtime.baseUrl, readyUrl: runtime.readyUrl,
+    consumer: runtime.consumer, surface: runtime.surface,
     governance: runtime.governance,
     fdObservation, childFdObservation, canaryPathError: pathError, protectedPathErrors, configSha256: sha256(configBytes),
   })}\n`)

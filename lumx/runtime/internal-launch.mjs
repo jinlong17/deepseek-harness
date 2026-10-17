@@ -18,8 +18,8 @@ function sourceModule(sourceRoot, relativePath) {
  * Launch the official DSH web profile as the current LUMX shared Host/UI surface.
  * This is private distribution glue, not the complete Electron Developer Host wrapper.
  *
- * @param {{ mode: 'consumer' | 'developer', osHome: string, workspaceDirectory: string, sourceRoot: string,
- *   port: number, auth: { byokKey: string, endpoint: string, gateway: object, getIdentity(): object | undefined, now?(): Date },
+ * @param {{ consumer?: 'desktop-byok' | 'platform-stub', mode: 'consumer' | 'developer', osHome: string, workspaceDirectory: string, sourceRoot: string,
+ *   port: number, auth?: { byokKey: string, endpoint: string, gateway: object, getIdentity(): object | undefined, now?(): Date },
  *   environment?: Record<string, string> }} input
  */
 export async function launchLumxRuntimeInProcess(input) {
@@ -42,17 +42,21 @@ export async function launchLumxRuntimeInProcess(input) {
     active = false
   }
   try {
+    const consumer = input.consumer ?? 'desktop-byok'
+    if (consumer !== 'desktop-byok' && consumer !== 'platform-stub') throw new Error('LUMX product consumer is invalid')
+    if (consumer === 'desktop-byok' && input.auth === undefined) throw new Error('desktop BYOK consumer requires launch-scoped admission')
     const launch = createLumxLaunchEnvironment(input)
     const runtimeId = randomUUID()
     const profileName = input.mode === 'developer' ? 'lumx-developer' : 'lumx'
     await mkdir(input.workspaceDirectory, { recursive: true, mode: 0o700 })
     const profile = await createLumxRuntimeProfile({
+      consumer,
       dataHomeDirectory: launch.dataHomeDirectory,
       profileName,
       runtimeId,
       sourceRoot: input.sourceRoot,
     })
-    releaseByok = installLumxByokRuntime({ runtimeId, ...input.auth })
+    if (consumer === 'desktop-byok') releaseByok = installLumxByokRuntime({ runtimeId, ...input.auth })
     previous = { cwd: process.cwd(), dshHome: process.env.DSH_HOME }
     process.chdir(input.workspaceDirectory)
     process.env.DSH_HOME = launch.dataHomeDirectory
@@ -89,6 +93,7 @@ export async function launchLumxRuntimeInProcess(input) {
       baseUrl,
       ctx: running.ctx,
       dataHomeDirectory: launch.dataHomeDirectory,
+      consumer,
       pid: process.pid,
       profileName,
       governance: Object.freeze({ rows: governance.rows.map(row => ({
@@ -96,7 +101,7 @@ export async function launchLumxRuntimeInProcess(input) {
         format: row.resolution.format, generation: row.resolution.generation,
       })) }),
       readyUrl,
-      surface: 'official-dsh-web-profile-shared-host',
+      surface: consumer === 'desktop-byok' ? 'official-dsh-web-profile-shared-host' : 'local-platform-stub',
       shutdown,
     })
   } catch (error) {

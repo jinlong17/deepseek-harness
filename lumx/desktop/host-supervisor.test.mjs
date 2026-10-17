@@ -131,3 +131,16 @@ test('two native Hosts isolate controls and persisted sessions survive a real pr
   assert.deepEqual(await restarted.shutdown(), { code: 0, signal: null })
   assert.equal(a.requests(), 1); assert.equal(b.requests(), 1)
 })
+
+test('supported native Host selects the product platform-stub without opening a BYOK relay', { timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'lumx-host-platform-stub-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const value = await fixture(root, 'platform-stub')
+  t.after(value.close)
+  const host = await value.launch({ consumer: 'platform-stub', auth: undefined })
+  t.after(host.shutdown)
+  assert.equal(host.consumer, 'platform-stub')
+  assert.equal(host.surface, 'local-platform-stub')
+  assert.equal(value.requests(), 0)
+  await host.shutdown()
+})

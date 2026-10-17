@@ -29,6 +29,13 @@ function loopback(value, label) {
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error(`${label} needs an explicit port`)
   return { url: url.href, port }
 }
+function hostConsumer(value) {
+  const consumer = value ?? 'desktop-byok'
+  if (consumer !== 'desktop-byok' && consumer !== 'platform-stub') {
+    throw new Error('Host product consumer is invalid')
+  }
+  return consumer
+}
 function tcpPort(value) {
   if (!Number.isSafeInteger(value) || value < 1 || value > 65535) throw new Error('Host port is invalid')
   return value
@@ -103,7 +110,9 @@ export async function launchLumxHost(input) {
   const dataHome = dataHomeFor(input.mode, osHome, workspaceDirectory)
   const port = tcpPort(input.port)
   const environment = launchEnvironment(input.environment)
-  const model = loopback(input.auth.endpoint, 'model endpoint')
+  const consumer = hostConsumer(input.consumer)
+  const model = consumer === 'desktop-byok'
+    ? loopback(input.auth?.endpoint, 'model endpoint') : undefined
   let runtime
   let relay
   try {
@@ -111,21 +120,25 @@ export async function launchLumxHost(input) {
     const processHome = join(runtime, 'home'); const temporary = join(runtime, 'tmp')
     mkdirSync(processHome, { mode: 0o700 }); mkdirSync(temporary, { mode: 0o700 })
     const bootstrap = buildLumxNativeBootstrap(join(runtime, 'lumx-bootstrap'))
-    relay = await createAcpModelRelay({
-      engineId: 'dsh-host', gateway: input.auth.gateway, getIdentity: input.auth.getIdentity,
-      launchId: input.launchId, model: 'lumx-loopback', providerEndpoint: model.url,
-      providerKey: input.auth.byokKey, sessionId: input.launchId,
-    })
-    const relayPort = Number(new URL(relay.endpoint).port)
+    if (consumer === 'desktop-byok') {
+      relay = await createAcpModelRelay({
+        engineId: 'dsh-host', gateway: input.auth.gateway, getIdentity: input.auth.getIdentity,
+        launchId: input.launchId, model: 'lumx-loopback', providerEndpoint: model.url,
+        providerKey: input.auth.byokKey, sessionId: input.launchId,
+      })
+    }
     const profile = createLumxHostSandboxProfile({
-      dataHome, forkRoot, nodePath, runtime, sourceRoot, workspaceDirectory, ports: [port, relayPort],
+      dataHome, forkRoot, nodePath, runtime, sourceRoot, workspaceDirectory,
+      ports: [port, ...relay === undefined ? [] : [Number(new URL(relay.endpoint).port)]],
     })
     const profilePath = join(runtime, 'lumx-host.sb')
     writeFileSync(profilePath, profile, { mode: 0o600 })
     const payload = {
-      mode: input.mode, osHome, workspaceDirectory,
+      consumer, mode: input.mode, osHome, workspaceDirectory,
       sourceRoot, port, environment, nodePath,
-      modelEndpoint: `${relay.endpoint}/chat/completions`, relayCapability: relay.capability,
+      ...consumer === 'desktop-byok' ? {
+        modelEndpoint: `${relay.endpoint}/chat/completions`, relayCapability: relay.capability,
+      } : {},
       fdTargets: input.fdQualification?.targets ?? [0, 3, 10, 11, 512],
       canary: input.fdQualification?.canary ?? { path: join(runtime, 'absent-canary'), dev: -1, ino: -1, bytes: 0, sha256: sha256('') },
       protectedPaths: input.fdQualification?.protectedPaths ?? [],
@@ -176,7 +189,7 @@ export async function launchLumxHost(input) {
       await Promise.race([exited, new Promise(resolveWait => setTimeout(resolveWait, 2_000))])
       if (Number.isSafeInteger(child.pid)) { try { process.kill(-child.pid, 'SIGKILL') } catch {} }
       await exited
-      await relay.dispose()
+      await relay?.dispose()
       rmSync(runtime, { recursive: true, force: true })
       throw error
     }
@@ -196,7 +209,7 @@ export async function launchLumxHost(input) {
         }
         return outcome
       } finally {
-        await relay.dispose().catch(() => {})
+        await relay?.dispose().catch(() => {})
         rmSync(runtime, { recursive: true, force: true })
       }
     })())
@@ -216,6 +229,7 @@ export async function launchLumxHost(input) {
       : Promise.reject(new Error('Host session identity is invalid'))
     return Object.freeze({
       baseUrl: readyValue.baseUrl, bootstrap: { path: bootstrap, sha256: sha256File(bootstrap) },
+      consumer: readyValue.consumer, surface: readyValue.surface,
       canaryPathError: readyValue.canaryPathError, configSha256: readyValue.configSha256,
       control: Object.freeze({ disconnect, healthCheck, inspectSession, shutdown }), fdObservation: readyValue.fdObservation,
       childFdObservation: readyValue.childFdObservation, hostProfile: { bytes: profile, path: profilePath, sha256: sha256(profile) },
