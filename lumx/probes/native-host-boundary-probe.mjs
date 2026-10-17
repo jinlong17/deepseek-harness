@@ -91,7 +91,9 @@ try {
   const repeatedShutdownSamePromise = firstShutdown === secondShutdown
   const shutdown = await firstShutdown
   writeFileSync(output, `${JSON.stringify({
-    attackerObservation, canary, childObservation: host.childFdObservation, denied, hostObservation: host.fdObservation,
+    attackerObservation, bootstrap: host.bootstrap, canary, canaryPathError: host.canaryPathError,
+    childObservation: host.childFdObservation, configSha256: host.configSha256, denied, execution: host.execution,
+    hostObservation: host.fdObservation, hostProfile: { bytes: host.hostProfile.bytes, sha256: host.hostProfile.sha256 },
     oldDirect, positive, providerRequests, readyStatus: ready.status, repeatedShutdownSamePromise, shutdown,
     supportedChain: ['native-adversarial-parent', 'supervisor', 'native-bootstrap', 'sandbox-exec', 'fresh-node-host'],
     unauthorizedProviderIo: providerRequests - providerRequestsAfterPositive,

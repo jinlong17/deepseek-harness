@@ -166,8 +166,10 @@ export async function launchLumxHost(input) {
       : Promise.reject(new Error('Host session identity is invalid'))
     return Object.freeze({
       baseUrl: readyValue.baseUrl, bootstrap: { path: bootstrap, sha256: sha256File(bootstrap) },
+      canaryPathError: readyValue.canaryPathError, configSha256: readyValue.configSha256,
       control: Object.freeze({ disconnect, healthCheck, inspectSession, shutdown }), fdObservation: readyValue.fdObservation,
       childFdObservation: readyValue.childFdObservation, hostProfile: { bytes: profile, path: profilePath, sha256: sha256(profile) },
+      execution: Object.freeze({ argv: Object.freeze([bootstrap, '/usr/bin/sandbox-exec', ...argv]), envKeys: Object.freeze(['HOME', 'LANG', 'LC_ALL', 'NO_COLOR', 'PATH', 'TMPDIR']) }),
       pid: child.pid, process: Object.freeze({ pid: child.pid }), readyUrl: readyValue.readyUrl,
       shutdown, stderr: () => stderr, stdout: () => [...stdout],
     })
