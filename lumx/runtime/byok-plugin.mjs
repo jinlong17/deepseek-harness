@@ -4,6 +4,12 @@ import { pathToFileURL } from 'node:url'
 import { admitLumxByok } from '../identity/byok-admission.mjs'
 
 const RUNTIMES = new Map()
+const ADMISSION_OBSERVATIONS = new WeakMap()
+
+/** Return credential-free outcomes recorded at the real LLM waterfall. */
+export function readLumxByokAdmissionObservations(ctx) {
+  return structuredClone(ADMISSION_OBSERVATIONS.get(ctx) ?? [])
+}
 
 function loopbackEndpoint(value) {
   const endpoint = new URL(value)
@@ -49,13 +55,24 @@ export const inject = ['llm']
 export async function apply(ctx, config) {
   const state = RUNTIMES.get(config.runtimeId)
   if (state === undefined) throw new Error('LUMX BYOK runtime state is unavailable')
+  const observations = []
+  ADMISSION_OBSERVATIONS.set(ctx, observations)
   ctx.on('llm/stream', async function * (_options, next) {
-    await admitLumxByok({
-      byokKey: state.byokKey,
-      gateway: state.gateway,
-      identity: state.getIdentity(),
-      now: state.now?.(),
-    })
+    try {
+      await admitLumxByok({
+        byokKey: state.byokKey,
+        gateway: state.gateway,
+        identity: state.getIdentity(),
+        now: state.now?.(),
+      })
+      observations.push({ ordinal: observations.length + 1, result: 'admitted' })
+    } catch (error) {
+      observations.push({
+        ordinal: observations.length + 1, result: 'denied',
+        code: error?.code, name: error?.name,
+      })
+      throw error
+    }
     yield * next()
   }, { global: true, prepend: true })
   const llmModule = await import(pathToFileURL(join(config.sourceRoot, 'packages/llm/llm/lib/index.js')).href)

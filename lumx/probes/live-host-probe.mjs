@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url'
 
 import { createLoopbackIdentityGateway } from '../identity/loopback-gateway.mjs'
 import { launchLumxRuntime } from '../runtime/launch.mjs'
+import { readLumxByokAdmissionObservations } from '../runtime/byok-plugin.mjs'
 
 function argumentsOf(argv) {
   const values = new Map()
@@ -58,6 +59,7 @@ function textOf(events) {
 }
 
 async function sessionAttempt(runtime, id, prompt) {
+  const admissionStart = readLumxByokAdmissionObservations(runtime.ctx).length
   const created = await runtime.ctx.sessionController.create({ sessionId: id, cwd: process.cwd() })
   await runtime.ctx.sessionController.prompt({
     requestId: `request-${id}`, sessionId: created.sessionId, mode: 'queue',
@@ -69,6 +71,7 @@ async function sessionAttempt(runtime, id, prompt) {
   const events = agent.session.snapshotEvents()
   return {
     assistantText: textOf(events),
+    admission: readLumxByokAdmissionObservations(runtime.ctx).slice(admissionStart),
     eventTypes: events.map(event => event.type),
     failures: events.filter(event => event.type === 'assistant/attempt').map(event => event.data.failure),
     sessionId: created.sessionId,
@@ -338,21 +341,36 @@ async function execute(options, capture) {
       ['wrong-origin-rejected', wrongOrigin.status === 403, capture.http.wrongOrigin],
       ['wrong-host-rejected', wrongHost.status === 403, capture.http.wrongHost],
       ['missing-origin-observed', true, capture.http.missingOrigin, false],
-      ['byok-anonymous-zero-model', anonymousModelRequests === 0, { modelRequests: anonymousModelRequests }],
-      ['byok-wrong-type-zero-model', wrongTypeModelRequests === 0, { modelRequests: wrongTypeModelRequests }],
-      ['byok-invalid-expiry-zero-model', invalidExpiryModelRequests === 0, { modelRequests: invalidExpiryModelRequests }],
-      ['byok-equal-expiry-zero-model', equalExpiryModelRequests === 0, { modelRequests: equalExpiryModelRequests }],
-      ['byok-subject-mismatch-zero-model', subjectMismatchModelRequests === 0, { modelRequests: subjectMismatchModelRequests }],
-      ['byok-expired-zero-model', expiredModelRequests === 0, { modelRequests: expiredModelRequests }],
-      ['byok-revoked-zero-model', revokedModelRequests === 0, { modelRequests: revokedModelRequests }],
+      ['byok-anonymous-zero-model', anonymousModelRequests === 0
+        && anonymous.admission.at(-1)?.result === 'denied' && anonymous.admission.at(-1)?.code === 'identity_required',
+      { admission: anonymous.admission, modelRequests: anonymousModelRequests }],
+      ['byok-wrong-type-zero-model', wrongTypeModelRequests === 0
+        && wrongType.admission.at(-1)?.result === 'denied' && wrongType.admission.at(-1)?.code === 'identity_required',
+      { admission: wrongType.admission, modelRequests: wrongTypeModelRequests }],
+      ['byok-invalid-expiry-zero-model', invalidExpiryModelRequests === 0
+        && invalidExpiry.admission.at(-1)?.result === 'denied' && invalidExpiry.admission.at(-1)?.code === 'identity_expired',
+      { admission: invalidExpiry.admission, modelRequests: invalidExpiryModelRequests }],
+      ['byok-equal-expiry-zero-model', equalExpiryModelRequests === 0
+        && equalExpiry.admission.at(-1)?.result === 'denied' && equalExpiry.admission.at(-1)?.code === 'identity_expired',
+      { admission: equalExpiry.admission, modelRequests: equalExpiryModelRequests }],
+      ['byok-subject-mismatch-zero-model', subjectMismatchModelRequests === 0
+        && subjectMismatch.admission.at(-1)?.result === 'denied' && subjectMismatch.admission.at(-1)?.code === 'identity_rejected',
+      { admission: subjectMismatch.admission, modelRequests: subjectMismatchModelRequests }],
+      ['byok-expired-zero-model', expiredModelRequests === 0
+        && expired.admission.at(-1)?.result === 'denied' && expired.admission.at(-1)?.code === 'identity_expired',
+      { admission: expired.admission, modelRequests: expiredModelRequests }],
+      ['byok-revoked-zero-model', revokedModelRequests === 0
+        && revoked.admission.at(-1)?.result === 'denied' && revoked.admission.at(-1)?.code === 'identity_rejected',
+      { admission: revoked.admission, modelRequests: revokedModelRequests }],
       ['byok-other-adapter-anonymous-blocked', alternateAdapter.anonymous.adapterCalls === 0
         && alternateAdapter.anonymous.error?.name === 'LumxByokAdmissionError', alternateAdapter.anonymous],
       ['byok-other-adapter-positive', alternateAdapter.admitted.adapterCalls === 1
         && alternateAdapter.admitted.chunks.at(-1)?.type === 'finish', alternateAdapter.admitted],
       ['byok-positive-model-response', positiveModelRequests === 1
+        && positive.admission.at(-1)?.result === 'admitted'
         && positive.assistantText.startsWith('LUMX synthetic response: ') && positive.assistantText.length > 25,
       {
-        assistantTextBytes: positive.assistantText.length, modelRequests: positiveModelRequests,
+        admission: positive.admission, assistantTextBytes: positive.assistantText.length, modelRequests: positiveModelRequests,
         modelTransaction: modelTransactions[0], requestId: 'request-lumx-positive', sessionId: positive.sessionId,
       }],
       ['shutdown-restart-clean', restartedReady.status === 303 && staleToken.status === 401
