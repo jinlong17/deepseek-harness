@@ -8,7 +8,7 @@ The launch description also records the current agent preference as `codex` befo
 
 `desktop/release-config.mjs` exports `createLumxElectronBuilderOverlay(base)` for a downstream Electron Builder configuration. It provides the product name, app id, and protocol without changing upstream Desktop files or creating a signed build.
 
-`identity/byok-admission.mjs` is a fail-closed BYOK login seam. Each request needs a current `lumx.local-auth.v1` identity plus a gateway confirmation. It has no DeepSeek account-plugin dependency. `identity/loopback-gateway.mjs` accepts only loopback endpoints so the included tests can prove the positive path without a real identity provider.
+`identity/byok-admission.mjs` is a fail-closed BYOK login seam. Each request needs a current `lumx.local-auth.v1` identity plus a gateway confirmation. It has no DeepSeek account-plugin dependency. `identity/loopback-gateway.mjs` accepts only literal `http://127.0.0.1` endpoints without userinfo, rejects redirects, and applies a one-second request limit so the included tests can prove the positive path without a real identity provider.
 
 Run the bounded checks with:
 

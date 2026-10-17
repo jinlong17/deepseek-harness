@@ -48,4 +48,29 @@ test('a valid synthetic identity passes only through a loopback stub gateway', a
 
 test('local gateway construction rejects a non-loopback endpoint', () => {
   assert.throws(() => createLoopbackIdentityGateway({ endpoint: 'https://identity.example.test/validate' }), /loopback/)
+  assert.throws(() => createLoopbackIdentityGateway({ endpoint: 'http://user:pass@127.0.0.1/validate' }), /userinfo/)
+})
+
+test('a redirect cannot forward a synthetic credential away from the loopback gateway', async () => {
+  let targetRequests = 0
+  const server = createServer((request, response) => {
+    if (request.url === '/redirect') {
+      response.writeHead(302, { location: `http://127.0.0.1:${server.address().port}/target` })
+      response.end()
+      return
+    }
+    targetRequests += 1
+    response.writeHead(204)
+    response.end()
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.notEqual(typeof address, 'string')
+    const gateway = createLoopbackIdentityGateway({ endpoint: `http://127.0.0.1:${address.port}/redirect` })
+    await assert.rejects(gateway.validate({ audience: 'com.lumxai.desktop', credential: 'synthetic-only', subject: 'user-42' }))
+    assert.equal(targetRequests, 0)
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error === undefined ? resolve() : reject(error)))
+  }
 })
