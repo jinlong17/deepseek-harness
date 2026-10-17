@@ -1,0 +1,7 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write lumx/README.md
+/lumx-desktop-boundary-modules:
+  en: ec2d3caaee9d9103
+  zh: d6ab8d0d92734fdf

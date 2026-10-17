@@ -1,5 +1,7 @@
 # LUMX Desktop boundary modules
 
+English | [中文](README.zh.md)
+
 `node lumx/desktop/launch.mjs <consumer|developer> <os-home> <workspace>` emits a consumable launch description for **LUMX Desktop** (`com.lumxai.desktop`, `lumx:///`). It only resolves settings; it never creates `~/.lumx`, migrates data, deletes data, launches Electron, signs artifacts, or sends telemetry.
 
 The consumer profile derives its data home as `<os-home>/.lumx`; the developer profile uses the separate sibling `<os-home>/.lumx-developer`. Launch output names both `profile` and `dataHomeDirectory`. Callers supply the workspace separately, and a workspace overlapping either data home in either direction is rejected, including a common ancestor such as the OS home or filesystem root. The check normalizes lexical `.` and `..` path syntax, but this configuration module does not resolve filesystem aliases or symlinks and does not itself prove OS-level isolation. `LUMX_TELEMETRY_ENABLED` defaults to enabled and accepts `on/off`, `true/false`, `yes/no`, or `1/0`; the value is configuration only and no telemetry transport is included.
