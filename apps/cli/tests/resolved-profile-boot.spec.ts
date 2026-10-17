@@ -34,7 +34,7 @@ afterEach(() => {
 
 describe('runProfile with an application-owned profile', () => {
   it.each(
-    ['composition', 'boot', 'watch', 'cleanup', 'tree-cleanup', 'both-cleanups'] as const,
+    ['composition', 'setup', 'boot', 'watch', 'cleanup', 'tree-cleanup', 'both-cleanups'] as const,
   )('releases startup resources after a %s failure', async (stage) => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-profile-startup-failure-'))
     homes.push(home)
@@ -68,6 +68,7 @@ describe('runProfile with an application-owned profile', () => {
       const application = runProfile({
         environment: createLaunchEnvironmentSnapshot([]), profile: 'desktop', patchFiles: [], args: ['--no-open'],
         resolvedProfile: { profile, installAnchor: join(home, 'runtime/package.json') },
+        setup: stage === 'setup' ? () => { throw failure } : undefined,
       })
       if (stage === 'both-cleanups') {
         await expect(application).rejects.toMatchObject({ errors: [failure, { errors: [treeCleanupFailure, cleanupFailure] }] })
@@ -135,10 +136,15 @@ describe('runProfile with an application-owned profile', () => {
     const environment = createLaunchEnvironmentSnapshot([{ source: 'process', values: { HTTPS_PROXY: 'http://localhost:8080' } }])
     const runtime = { profile, installAnchor: join(home, 'runtime/package.json') }
     try {
+      const setup = vi.fn(async (hostCtx: Context) => {
+        expect(hostCtx).toBe(ctx)
+        expect(plugin).toHaveBeenCalledWith(PluginPackages, { resolution: expect.anything() })
+      })
       const { shutdown } = await runProfile({
         environment, profile: 'desktop', resolvedProfile: runtime,
-        patchFiles: [overlay], args: ['--port', '0', '--no-open'],
+        patchFiles: [overlay], args: ['--port', '0', '--no-open'], setup,
       })
+      expect(setup).toHaveBeenCalledOnce()
       expect(installProxyFromEnvironment).toHaveBeenCalledWith(environment, expect.any(Function))
       const resolution = vi.mocked(createRuntimeResolution).mock.settledResults
         .find(result => result.type === 'fulfilled')?.value

@@ -232,6 +232,8 @@ export interface RunProfileOptions {
   args: readonly string[]
   /** Application-owned package runtime, scoped to plugin package operations. */
   packageManager?: ProfileContext['packageManager']
+  /** Application-owned root setup after package resolution and before config entries mount. */
+  setup?: (ctx: Context) => void | Promise<void>
 }
 
 /**
@@ -302,6 +304,7 @@ export async function runProfile(options: RunProfileOptions): Promise<{ ctx: Con
       await hostCtx.plugin(PluginPackages, {
         resolution: composed.resolution,
       })
+      await options.setup?.(hostCtx)
       // The command line and bounded exit request are launcher facts available
       // to every app plugin that injects the argument snapshot.
       provideCmdline(hostCtx, {
