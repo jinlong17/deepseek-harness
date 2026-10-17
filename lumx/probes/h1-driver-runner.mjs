@@ -128,15 +128,18 @@ function sourceAndRuntimeSnapshot(options) {
     throw new Error('source lock has an invalid DSH source revision')
   }
   const lockedNode = sourceLock.runtime.engine_node
-  const node = {
-    path: options.node,
-    sha256: sha256(options.node),
-    version: command(options.node, ['--version'], options.sourceRoot),
+  const nodePath = realpathOrResolved(options.node)
+  const nodeSha256 = sha256(options.node)
+  if (nodePath !== realpathOrResolved(lockedNode.path) || nodeSha256 !== lockedNode.sha256) {
+    throw new Error('Node executable path or bytes differ from runtime.engine_node lock')
   }
-  if (node.path !== realpathOrResolved(lockedNode.path)
-    || node.sha256 !== lockedNode.sha256
-    || node.version !== lockedNode.version) {
-    throw new Error('Node executable differs from runtime.engine_node lock')
+  const nodeVersion = command(options.node, ['--version'], options.sourceRoot)
+  if (nodeVersion !== lockedNode.version) throw new Error('Node version differs from runtime.engine_node lock')
+  const node = { path: nodePath, sha256: nodeSha256, version: nodeVersion }
+  try {
+    git(options.forkRoot, 'merge-base', '--is-ancestor', pinnedCommit, 'HEAD')
+  } catch {
+    throw new Error('pinned source is not an ancestor of the fork HEAD')
   }
   const committed = git(options.forkRoot, 'diff', '--name-only', `${pinnedCommit}..HEAD`)
     .split('\n').filter(Boolean)
