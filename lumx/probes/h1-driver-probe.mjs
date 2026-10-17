@@ -1,10 +1,10 @@
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { connect } from 'node:net'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { launchH1DriverRuntime } from '../runtime/h1-driver-runtime.mjs'
+import { createH1GovernedAgent, launchH1DriverRuntime } from '../runtime/h1-driver-runtime.mjs'
 
 /** Lab-only executable: collect dynamic qualification evidence from real DSH composition paths. */
 
@@ -100,23 +100,42 @@ function listenLoopback(handler) {
   })
 }
 
-async function createH1LoopbackStubs() {
+async function createH1LoopbackStubs(nativeCanaryPath) {
   const wire = { broker: [], model: [] }
   let brokerScenarioOrdinal = 0
+  let nativeScenarioOrdinal = 0
   const model = await listenLoopback(async (request, response) => {
     const body = await jsonBody(request)
-    const gatewayRefusal = JSON.stringify(body.messages).includes('gateway-refusal')
+    const messages = JSON.stringify(body.messages)
+    const gatewayRefusal = messages.includes('gateway-refusal')
+    const nativeToolNegative = messages.includes('native-tool-negative')
+    const scenario = gatewayRefusal ? 'gateway-refusal'
+      : nativeToolNegative ? 'native-tool-negative' : 'broker-refusal'
     const record = {
       body,
       method: request.method,
       path: request.url,
       responseStatus: gatewayRefusal ? 403 : 200,
-      scenario: gatewayRefusal ? 'gateway-refusal' : 'broker-refusal',
+      scenario,
     }
     wire.model.push(record)
     if (gatewayRefusal) {
       response.writeHead(403, { 'content-type': 'application/json' })
       response.end(JSON.stringify({ error: 'controlled model gateway refusal' }))
+      return
+    }
+    if (nativeToolNegative) {
+      nativeScenarioOrdinal += 1
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify(nativeScenarioOrdinal === 1 ? {
+        type: 'tool-call', id: 'h1-native-bash-call-1', name: 'bash',
+        arguments: {
+          command: `printf native-executed > ${JSON.stringify(nativeCanaryPath)}`,
+          description: 'Mutate synthetic native tool canary',
+        },
+      } : {
+        type: 'text', text: 'Native tool refusal observed; stop.',
+      }))
       return
     }
     brokerScenarioOrdinal += 1
@@ -177,10 +196,28 @@ async function runH1(options) {
   const handles = []
   const observation = { phase: 'starting' }
   try {
-    stubs = await createH1LoopbackStubs()
+    const nativeCanaryPath = join(options.workspace, 'native-tool-canary.txt')
+    const nativeCanaryOriginal = 'synthetic-native-tool-canary\n'
+    await writeFile(nativeCanaryPath, nativeCanaryOriginal, { mode: 0o600 })
+    stubs = await createH1LoopbackStubs(nativeCanaryPath)
     observation.phase = 'loopback-ready'
     const physicalNetwork = await deniedPhysicalNetworkAttempt()
     const dataHomeDirectory = join(options.osHome, '.lumx', 'h1-driver')
+    let preparationFailure
+    try {
+      await launchH1DriverRuntime({
+        brokerEndpoint: stubs.brokerEndpoint,
+        dataHomeDirectory: join(options.osHome, '.lumx', 'h1-preparation-failure'),
+        modelEndpoint: 'https://not-loopback.invalid/model',
+        sourceRoot: options.sourceRoot,
+        workspaceDirectory: options.workspace,
+        environment: { DSH_TELEMETRY_DISABLED: '1' },
+      })
+      throw new Error('invalid H1 endpoint unexpectedly launched')
+    } catch (error) {
+      preparationFailure = errorRecord(error)
+      if (!preparationFailure.message.includes('literal IPv4 loopback')) throw error
+    }
     runtime = await launchH1DriverRuntime({
       brokerEndpoint: stubs.brokerEndpoint,
       dataHomeDirectory,
@@ -190,11 +227,9 @@ async function runH1(options) {
       environment: { DSH_TELEMETRY_DISABLED: '1' },
     })
     observation.phase = 'profile-started'
-    const createAgent = sessionId => runtime.ctx.agents.create({
+    const createAgent = sessionId => createH1GovernedAgent(runtime.ctx, {
       sessionId,
-      agentOptions: { provider: 'lumx-h1', model: 'h1-controlled' },
-      meta: { cwd: options.workspace },
-      setup(agentCtx) { agentCtx.tools.restrict({ allow: ['lumx_broker'] }) },
+      workspaceDirectory: options.workspace,
     })
     const brokerHandle = await createAgent('lumx-h1-broker-refusal')
     handles.push(brokerHandle)
@@ -216,22 +251,40 @@ async function runH1(options) {
       source: { kind: 'user' },
     }))
     await withDeadline('H1 model-gateway-refusal turn', gatewayHandle.agent.whenIdle())
+    observation.phase = 'gateway-turn-complete'
+    const nativeHandle = await createAgent('lumx-h1-native-tool-negative')
+    handles.push(nativeHandle)
+    nativeHandle.agent.followup(llm.createUserMessage({
+      content: [{ type: 'text', text: 'native-tool-negative: attempt the native bash tool, observe refusal, then stop.' }],
+      source: { kind: 'user' },
+    }))
+    await withDeadline('H1 native-tool-negative turn', nativeHandle.agent.whenIdle())
     observation.phase = 'turns-complete'
     const brokerEvents = brokerHandle.agent.session.snapshotEvents()
     const gatewayEvents = gatewayHandle.agent.session.snapshotEvents()
+    const nativeEvents = nativeHandle.agent.session.snapshotEvents()
     const state = runtime.snapshot()
     const brokerRetryEvents = brokerEvents.filter(event => event.type === 'llm/retry' || event.type === 'llm/retry-started')
     const gatewayRetryEvents = gatewayEvents.filter(event => event.type === 'llm/retry' || event.type === 'llm/retry-started')
+    const nativeRetryEvents = nativeEvents.filter(event => event.type === 'llm/retry' || event.type === 'llm/retry-started')
     const brokerRefusalEvents = brokerEvents.filter(event => event.type === 'tool/result' && event.data.message.isError === true)
     const brokerTurnEnds = brokerEvents.filter(event => event.type === 'turn/end')
     const gatewayTurnEnds = gatewayEvents.filter(event => event.type === 'turn/end')
     const gatewayFailures = gatewayEvents.filter(event => event.type === 'assistant/attempt')
+    const nativeCalls = nativeEvents.filter(event => event.type === 'tool/call' && event.data.name === 'bash')
+    const nativeRefusals = nativeEvents.filter(event => event.type === 'tool/result'
+      && event.data.message.isError === true
+      && event.data.message.toolCallId === nativeCalls[0]?.data.callId)
+    const nativeTurnEnds = nativeEvents.filter(event => event.type === 'turn/end')
     const inventoryNames = inventory.map(row => row.name)
     const adapterRequestToolNames = state.modelRequests.map(request => request.tools.map(row => row.name))
     const wireRequestToolNames = stubs.wire.model.map(request => request.body.tools.map(row => row.name))
     const brokerModelWire = stubs.wire.model.filter(request => request.scenario === 'broker-refusal')
     const gatewayModelWire = stubs.wire.model.filter(request => request.scenario === 'gateway-refusal')
+    const nativeModelWire = stubs.wire.model.filter(request => request.scenario === 'native-tool-negative')
     const loaderEntries = [...runtime.ctx.loader.entries()]
+    const nativeLoaderEntry = loaderEntries.find(candidate => candidate.options.id === 'tool-bash')
+    const nativeCanaryAfter = await readFile(nativeCanaryPath, 'utf8')
     const privacyRows = runtime.profile.privacyRows.map(id => {
       const entry = loaderEntries.find(candidate => candidate.options.id === id)
       return {
@@ -245,6 +298,8 @@ async function runH1(options) {
     const subchecks = [
       subcheck('runProfile-composition', runtime.profile.bundles.join(',') === '@deepseek-ai/dsh-base', runtime.profile,
         'the actual base profile did not compose'),
+      subcheck('preparation-failure-recovery', preparationFailure.message.includes('literal IPv4 loopback'),
+        preparationFailure, 'a preparation failure poisoned the process-global launch lifecycle'),
       subcheck('privacy-rows-inert', privacyRows.every(row => !row.resolved
         || (row.disabled === true && row.fiberPresent === false)),
       privacyRows, 'a resolved privacy row was enabled or owned a live fiber'),
@@ -252,7 +307,8 @@ async function runH1(options) {
         'the OS sandbox did not deny the physical-network negative control'),
       subcheck('actual-agent-inventory', JSON.stringify(inventoryNames) === JSON.stringify(['lumx_broker']),
         { inventory, names: inventoryNames }, 'ctx.tools.schemas(actualAgent) exposed a non-Broker tool'),
-      subcheck('actual-model-request-tools', wireRequestToolNames.length === 3
+      subcheck('actual-model-request-tools', wireRequestToolNames.length > 0
+        && wireRequestToolNames.length === adapterRequestToolNames.length
         && wireRequestToolNames.every(names => JSON.stringify(names) === JSON.stringify(['lumx_broker']))
         && JSON.stringify(wireRequestToolNames) === JSON.stringify(adapterRequestToolNames),
       { adapterRequestToolNames, wireRequestToolNames },
@@ -287,6 +343,28 @@ async function runH1(options) {
       subcheck('model-gateway-retry-count', gatewayRetryEvents.length === 0,
         { count: gatewayRetryEvents.length, events: gatewayRetryEvents },
         'the complete model Gateway refusal turn emitted an unexpected retry'),
+      subcheck('native-tool-row-disabled', nativeLoaderEntry !== undefined
+        && nativeLoaderEntry.disabled === true && nativeLoaderEntry.fiber === undefined,
+      nativeLoaderEntry === undefined ? { id: 'tool-bash', resolved: false } : {
+        id: nativeLoaderEntry.options.id,
+        packageName: nativeLoaderEntry.options.name,
+        disabled: nativeLoaderEntry.disabled,
+        fiberPresent: nativeLoaderEntry.fiber !== undefined,
+      }, 'the real tool-bash loader row was absent, enabled, or owned a live fiber'),
+      subcheck('native-tool-runtime-refusal', nativeCalls.length === 1 && nativeRefusals.length === 1,
+        { calls: nativeCalls, refusals: nativeRefusals },
+        'the actual Agent/ToolRuntime did not refuse exactly one unadvertised native bash call'),
+      subcheck('native-tool-canary-unchanged', nativeCanaryAfter === nativeCanaryOriginal,
+        { after: nativeCanaryAfter, expected: nativeCanaryOriginal, path: nativeCanaryPath },
+        'the disabled native bash path mutated the synthetic canary'),
+      subcheck('native-tool-negative-model-io', nativeModelWire.length === 2
+        && nativeModelWire.every(row => row.method === 'POST' && row.responseStatus === 200),
+      nativeModelWire, 'the native-tool negative turn did not cross the model Gateway twice'),
+      subcheck('native-tool-negative-turn-completed', nativeTurnEnds.length === 1,
+        nativeTurnEnds, 'the native-tool refusal path did not reach a durable turn/end'),
+      subcheck('native-tool-negative-retry-count', nativeRetryEvents.length === 0,
+        { count: nativeRetryEvents.length, events: nativeRetryEvents },
+        'the complete native-tool refusal turn emitted an unexpected retry'),
     ]
     return {
       observation: {
@@ -298,7 +376,11 @@ async function runH1(options) {
         gatewayEventTypes: gatewayEvents.map(event => event.type),
         gatewayRetryCount: gatewayRetryEvents.length,
         inventory,
+        nativeCanary: { after: nativeCanaryAfter, expected: nativeCanaryOriginal, path: nativeCanaryPath },
+        nativeEventTypes: nativeEvents.map(event => event.type),
+        nativeRetryCount: nativeRetryEvents.length,
         physicalNetwork,
+        preparationFailure,
         privacyRows,
         wire: stubs.wire,
       },
