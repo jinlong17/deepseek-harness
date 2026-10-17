@@ -197,9 +197,12 @@ async function createBrowserState(options, runtime) {
   const chromium = await playwrightFrom(options.sourceRoot)
   if (chromium === undefined) throw new Error('pinned Playwright Chromium export is unavailable')
   const userDataDir = join(dirname(options.output), 'chrome-profile')
+  const browserTemp = join(dirname(options.output), 'chrome-tmp')
   mkdirSync(userDataDir, { recursive: true, mode: 0o700 })
+  mkdirSync(browserTemp, { recursive: true, mode: 0o700 })
   const context = await chromium.launchPersistentContext(userDataDir, {
     executablePath: options.browser, headless: true, locale: 'en-US',
+    env: { ...process.env, MAC_CHROMIUM_TMPDIR: browserTemp, TMPDIR: browserTemp },
     args: [
       '--no-sandbox', '--disable-gpu', '--disable-background-networking', '--disable-component-update',
       '--disable-default-apps', '--disable-sync', '--metrics-recording-only', '--no-first-run',
