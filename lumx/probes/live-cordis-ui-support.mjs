@@ -125,13 +125,15 @@ async function connectWorkspace(page, workspace) {
 }
 
 export async function locateDurableSession(page, expected = ACP_RESPONSE) {
-  if (await page.getByText(expected, { exact: true }).count() > 0) return true
+  const expectedResponse = page.getByText(expected, { exact: true }).first()
+  if (await expectedResponse.count() > 0
+    && await expectedResponse.waitFor({ state: 'visible', timeout: 2_000 }).then(() => true).catch(() => false)) return true
   const rows = page.locator('[role="treeitem"]')
   for (let index = 0; index < await rows.count(); index += 1) {
     try {
       await rows.nth(index).click({ timeout: 2_000 })
-      await page.waitForTimeout(150)
-      if (await page.getByText(expected, { exact: true }).count() > 0) return true
+      await expectedResponse.waitFor({ state: 'visible', timeout: 2_000 })
+      return true
     } catch {}
   }
   return false
@@ -183,6 +185,11 @@ export async function createBrowserState(options, runtime, acp, cancelBarrier) {
     }
     const workspace = await connectWorkspace(page, options.workspace)
     const durableRendered = await locateDurableSession(page)
+    const initialRender = {
+      acpPrompt: await page.getByText(ACP_PROMPT, { exact: true }).count(),
+      acpResponse: await page.getByText(ACP_RESPONSE, { exact: true }).count(),
+    }
+    await page.screenshot({ path: join(dirname(options.output), 'live-cordis-ui-initial.png'), fullPage: true })
     const input = page.locator('[data-composer-input][contenteditable="true"]').first()
     await input.waitFor({ timeout: 20_000 })
     const listed = await runtime.ctx.sessionController.list({}, AbortSignal.timeout(10_000))
@@ -199,10 +206,7 @@ export async function createBrowserState(options, runtime, acp, cancelBarrier) {
     await page.screenshot({ path: join(dirname(options.output), 'live-cordis-ui-cancel.png'), fullPage: true })
     return {
       apiRequests, consoleErrors, context, durable, durableRendered, onboarding, page, pageErrors, workspace,
-      initialRender: {
-        acpPrompt: await page.getByText(ACP_PROMPT, { exact: true }).count(),
-        acpResponse: await page.getByText(ACP_RESPONSE, { exact: true }).count(),
-      },
+      initialRender,
     }
   } catch (error) {
     await context.close().catch(() => {})

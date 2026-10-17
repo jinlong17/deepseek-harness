@@ -364,7 +364,7 @@ async function execute(options, capture) {
         && revoked.admission.at(-1)?.result === 'denied' && revoked.admission.at(-1)?.code === 'identity_rejected',
       { admission: revoked.admission, modelRequests: revokedModelRequests }],
       ['byok-other-adapter-anonymous-blocked', alternateAdapter.anonymous.adapterCalls === 0
-        && alternateAdapter.anonymous.error?.name === 'LumxByokAdmissionError', alternateAdapter.anonymous],
+        && alternateAdapter.anonymous.error?.code === 'identity_required', alternateAdapter.anonymous],
       ['byok-other-adapter-positive', alternateAdapter.admitted.adapterCalls === 1
         && alternateAdapter.admitted.chunks.at(-1)?.type === 'finish', alternateAdapter.admitted],
       ['byok-positive-model-response', positiveModelRequests === 1
