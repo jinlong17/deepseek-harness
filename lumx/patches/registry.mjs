@@ -1,4 +1,4 @@
-/** Product patch registry. The entries are imported by downstream release tooling. */
+/** Product patch metadata validated by probes; a release consumer is not yet wired. */
 export const PATCH_BUDGET = 12
 
 export const PRODUCT_PATCHES = Object.freeze([
@@ -19,6 +19,22 @@ export const PRODUCT_PATCHES = Object.freeze([
       'node --test lumx/desktop/launch-environment.test.mjs',
       'node --test lumx/identity/byok-admission.test.mjs',
       'node --test lumx/patches/registry.test.mjs',
+    ]),
+  }),
+  Object.freeze({
+    files: Object.freeze([
+      'lumx/runtime/launch.mjs',
+      'lumx/runtime/profile.mjs',
+      'lumx/runtime/byok-plugin.mjs',
+      'lumx/runtime/privacy.patch.yml',
+    ]),
+    id: 'G9-1-B2',
+    purpose: 'Launch the official Web profile as the LUMX shared Host/UI surface with the seven-row privacy overlay and per-call BYOK admission.',
+    removal: 'Remove lumx/runtime and this registry entry to withdraw the private LUMX profile launcher and BYOK adapter.',
+    removalPaths: Object.freeze(['lumx/runtime/', 'lumx/patches/registry.mjs']),
+    tests: Object.freeze([
+      'node --test lumx/probes/live-host.unit.test.mjs',
+      'node lumx/probes/live-host-probe.mjs --source-root <pinned-source> --output <capture>',
     ]),
   }),
 ])
