@@ -9,7 +9,7 @@ import { launchLumxHost } from '../desktop/host-supervisor.mjs'
 
 const NODE = '/Users/jinlong/.local/opt/node-v24.20.0/bin/node'
 const NODE_SHA256 = '9d050fd455b56426e25d4d603c7c501cbb2630348e836cf221dcce748e90588a'
-const SOURCE = '/Users/jinlong/.codex/worktrees/a2k-desktop-p1a-gate1/.local/g9-1/deps-source'
+const SOURCE = '/Users/jinlong/.codex/worktrees/a2k-desktop-p1a-gate1/.local/g9-1/deepseek-harness'
 const FORK = '/Users/jinlong/.codex/worktrees/a2k-desktop-p1a-gate1/.local/g9-1/deepseek-harness'
 const TARGETS = [0, 1, 2, 3, 10, 11, 512]
 

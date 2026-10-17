@@ -93,6 +93,7 @@ try {
   })
   process.stdout.write(`${JSON.stringify({
     type: 'ready', pid: process.pid, baseUrl: runtime.baseUrl, readyUrl: runtime.readyUrl,
+    governance: runtime.governance,
     fdObservation, childFdObservation, canaryPathError: pathError, protectedPathErrors, configSha256: sha256(configBytes),
   })}\n`)
 } catch (error) {

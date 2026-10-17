@@ -219,6 +219,7 @@ export async function launchLumxHost(input) {
       canaryPathError: readyValue.canaryPathError, configSha256: readyValue.configSha256,
       control: Object.freeze({ disconnect, healthCheck, inspectSession, shutdown }), fdObservation: readyValue.fdObservation,
       childFdObservation: readyValue.childFdObservation, hostProfile: { bytes: profile, path: profilePath, sha256: sha256(profile) },
+      governance: readyValue.governance,
       execution: Object.freeze({ argv: Object.freeze([bootstrap, '/usr/bin/sandbox-exec', ...argv]), envKeys: Object.freeze(['HOME', 'LANG', 'LC_ALL', 'NO_COLOR', 'PATH', 'TMPDIR']) }),
       pid: child.pid, process: Object.freeze({ pid: child.pid }), readyUrl: readyValue.readyUrl,
       protectedPathErrors: readyValue.protectedPathErrors,

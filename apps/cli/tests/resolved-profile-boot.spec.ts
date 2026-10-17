@@ -68,7 +68,7 @@ describe('runProfile with an application-owned profile', () => {
       const application = runProfile({
         environment: createLaunchEnvironmentSnapshot([]), profile: 'desktop', patchFiles: [], args: ['--no-open'],
         resolvedProfile: { profile, installAnchor: join(home, 'runtime/package.json') },
-        setup: stage === 'setup' ? () => { throw failure } : undefined,
+        ...(stage === 'setup' ? { setup: () => { throw failure } } : {}),
       })
       if (stage === 'both-cleanups') {
         await expect(application).rejects.toMatchObject({ errors: [failure, { errors: [treeCleanupFailure, cleanupFailure] }] })

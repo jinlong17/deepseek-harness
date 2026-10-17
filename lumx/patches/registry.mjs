@@ -40,6 +40,35 @@ export const PRODUCT_PATCHES = Object.freeze([
     ]),
   }),
   Object.freeze({
+    files: Object.freeze(['apps/cli/src/profile-boot.ts']),
+    id: 'G9-1-P4',
+    purpose: 'Await application-owned root setup after package resolution and before profile entries mount.',
+    removal: 'Remove the profile setup option and this registry entry together.',
+    removalPaths: Object.freeze(['apps/cli/src/profile-boot.ts', 'lumx/patches/registry.mjs']),
+    tests: Object.freeze(['vitest run apps/cli/tests/resolved-profile-boot.spec.ts']),
+  }),
+  Object.freeze({
+    files: Object.freeze([
+      'vendor/loader/src/index.ts', 'vendor/loader/src/config/entry.ts',
+      'vendor/loader/src/config/group.ts', 'vendor/loader/src/config/tree.ts',
+    ]),
+    id: 'G9-1-P5',
+    purpose: 'Expose synchronous typed entry admission before mutation, import, activation, and removal.',
+    removal: 'Remove the loader admission event and transactional entry changes with this registry entry.',
+    removalPaths: Object.freeze(['vendor/loader/src/', 'lumx/patches/registry.mjs']),
+    tests: Object.freeze(['vitest run apps/cli/tests/loader-entry-admission.spec.ts']),
+  }),
+  Object.freeze({
+    files: Object.freeze([
+      'lumx/runtime/governance.mjs', 'lumx/runtime/internal-launch.mjs',
+    ]),
+    id: 'G9-1-P6',
+    purpose: 'Own the fixed seven-row LUMX privacy policy for the complete Host lifetime.',
+    removal: 'Remove governance setup and this registry entry together.',
+    removalPaths: Object.freeze(['lumx/runtime/governance.mjs', 'lumx/runtime/internal-launch.mjs', 'lumx/patches/registry.mjs']),
+    tests: Object.freeze(['node --test lumx/runtime/governance.test.mjs']),
+  }),
+  Object.freeze({
     files: Object.freeze([
       'lumx/drivers/acp/model-relay.mjs',
       'lumx/drivers/acp/qwen-feasibility.mjs',

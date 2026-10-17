@@ -6,11 +6,34 @@ import { pathToFileURL } from 'node:url'
 import { createLumxLaunchEnvironment } from '../desktop/launch-environment.mjs'
 import { installLumxByokRuntime } from './byok-plugin.mjs'
 import { createLumxRuntimeProfile } from './profile.mjs'
+import { installLumxGovernance } from './governance.mjs'
 
 let active = false
 
 function sourceModule(sourceRoot, relativePath) {
   return pathToFileURL(join(sourceRoot, relativePath)).href
+}
+
+async function qualifyGovernance(ctx, governance) {
+  const loader = ctx.loader
+  const target = governance.rows[0]
+  const entry = [...loader.entries()].find(value => value.options.id === target.id)
+  if (!entry) throw new Error(`LUMX governance row is absent: ${target.id}`)
+  const group = entry.parent
+  const original = entry.options
+  await group.update(group.data.map(row => row.id === target.id ? { ...row, disabled: false } : row))
+  const lateEnableDenied = entry.disabled && entry.options === original
+  let removeDenied = false
+  try { group.remove(target.id) } catch { removeDenied = true }
+  let aliasDenied = false
+  try { await group.create({ name: target.resolution.url }) } catch { aliasDenied = true }
+  await group.update([
+    ...group.data.filter(row => row.id !== target.id),
+    { id: `${target.id}-renamed`, name: target.specifier },
+  ])
+  const renameDenied = entry.options === original
+    && group.data.every(row => row.id !== `${target.id}-renamed`)
+  return Object.freeze({ aliasDenied, lateEnableDenied, removeDenied, renameDenied })
 }
 
 /**
@@ -60,6 +83,7 @@ export async function launchLumxRuntimeInProcess(input) {
     const launchEnvironment = await import(sourceModule(input.sourceRoot, 'packages/util/launch-environment/lib/index.js'))
     const resolvedProfile = appBoot.loadProfileDirectory('LUMX Desktop', profile.profileDirectory, profile.installAnchor)
     appBoot.reportSkippedBundles('LUMX Desktop', resolvedProfile)
+    let governance
     running = await launcher.runProfile({
       environment: launchEnvironment.createLaunchEnvironmentSnapshot([
         { source: 'process', values: input.environment ?? {} },
@@ -67,8 +91,17 @@ export async function launchLumxRuntimeInProcess(input) {
       profile: profileName,
       resolvedProfile: { profile: resolvedProfile, installAnchor: profile.installAnchor },
       patchFiles: [profile.runtimePatch],
+      setup(hostCtx) {
+        governance = installLumxGovernance(hostCtx)
+        governance.assertInstalled()
+      },
       args: ['--no-open', '--host', '127.0.0.1', '--port', String(input.port)],
     })
+    if (!governance) throw new Error('LUMX governance setup was not invoked')
+    const governanceQualification = await qualifyGovernance(running.ctx, governance)
+    if (Object.values(governanceQualification).some(value => value !== true)) {
+      throw new Error('LUMX governance qualification failed')
+    }
     const port = running.ctx.webServer.port
     const baseUrl = `http://127.0.0.1:${String(port)}`
     const readyUrl = running.ctx.connection.authenticatedUrl(baseUrl)
@@ -84,6 +117,10 @@ export async function launchLumxRuntimeInProcess(input) {
       dataHomeDirectory: launch.dataHomeDirectory,
       pid: process.pid,
       profileName,
+      governance: Object.freeze({ rows: governance.rows.map(row => ({
+        id: row.id, specifier: row.specifier, url: row.resolution.url,
+        format: row.resolution.format, generation: row.resolution.generation,
+      })), qualification: governanceQualification }),
       readyUrl,
       surface: 'official-dsh-web-profile-shared-host',
       shutdown,
