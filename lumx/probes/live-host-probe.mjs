@@ -243,6 +243,7 @@ async function execute(options, capture) {
 
     const alternateAdapter = await alternateAdapterAttempts(runtime, options.sourceRoot, value => { identity = value })
 
+    identity = undefined
     let before = modelRequests
     const anonymous = await sessionAttempt(runtime, 'lumx-anonymous', 'anonymous must not call model')
     const anonymousModelRequests = modelRequests - before

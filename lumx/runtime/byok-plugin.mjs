@@ -8,7 +8,7 @@ const ADMISSION_OBSERVATIONS = new WeakMap()
 
 /** Return credential-free outcomes recorded at the real LLM waterfall. */
 export function readLumxByokAdmissionObservations(ctx) {
-  return structuredClone(ADMISSION_OBSERVATIONS.get(ctx) ?? [])
+  return structuredClone(ADMISSION_OBSERVATIONS.get(ctx.root ?? ctx) ?? [])
 }
 
 function loopbackEndpoint(value) {
@@ -56,7 +56,7 @@ export async function apply(ctx, config) {
   const state = RUNTIMES.get(config.runtimeId)
   if (state === undefined) throw new Error('LUMX BYOK runtime state is unavailable')
   const observations = []
-  ADMISSION_OBSERVATIONS.set(ctx, observations)
+  ADMISSION_OBSERVATIONS.set(ctx.root ?? ctx, observations)
   ctx.on('llm/stream', async function * (_options, next) {
     try {
       await admitLumxByok({
