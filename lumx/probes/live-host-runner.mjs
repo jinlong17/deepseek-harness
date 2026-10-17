@@ -174,8 +174,12 @@ function sandboxProfile({ browser, forkRoot, node, runtime, sourceRoot }, ports)
   if (browser !== undefined) {
     lines.push('(allow mach-lookup)')
     lines.push('(allow ipc-posix-shm)')
+    lines.push('(allow ipc-posix-sem)')
     const tempRoot = dirname(runtime).replaceAll('\\', '\\\\').replaceAll('.', '\\.')
-    lines.push(`(allow file-read* file-write* (regex #"^${tempRoot}/\\.org\\.chromium\\.Chromium\\.[^/]+(/.*)?$"))`)
+    const singleton = `^${tempRoot}/\\.org\\.chromium\\.Chromium\\.[^/]+(/.*)?$`
+    lines.push(`(allow file-read* file-write* (regex #"${singleton}"))`)
+    lines.push(`(allow network-bind network-inbound (local unix-socket (regex #"${singleton}")))`)
+    lines.push(`(allow network-outbound (remote unix-socket (regex #"${singleton}")))`)
   }
   return `${[...new Set(lines)].join('\n')}\n`
 }
