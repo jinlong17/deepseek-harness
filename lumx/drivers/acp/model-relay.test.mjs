@@ -87,6 +87,27 @@ test('rejects identity expiry or replacement while async validation is in flight
   assert.equal(upstream.requests.length, 0)
 })
 
+test('rejects in-place identity mutation while async validation is in flight', async (t) => {
+  const upstream = await provider(t)
+  const current = { ...identity }
+  let startedResolve
+  const started = new Promise(resolve => { startedResolve = resolve })
+  let release
+  const blocked = new Promise(resolve => { release = resolve })
+  const relay = await createAcpModelRelay({
+    engineId: 'qwen-0.24.0', getIdentity: () => current, launchId: 'launch-in-place', model: 'synthetic-model',
+    providerEndpoint: upstream.endpoint, providerKey: 'provider-only-key', sessionId: 'session-in-place',
+    gateway: { validate: async input => { startedResolve(); await blocked; return { active: true, expiresAt: future, subject: input.subject } } },
+  })
+  t.after(() => relay.dispose())
+  const pending = relay.admit('prompt')
+  await started
+  current.credential = 'mutated-in-place'
+  release()
+  await assert.rejects(pending, error => error.code === 'identity_rejected')
+  assert.equal(upstream.requests.length, 0)
+})
+
 test('rechecks real-time expiry after barrier-controlled gateway validation', async (t) => {
   const upstream = await provider(t)
   let release
@@ -152,6 +173,45 @@ test('unauthorized relay requests cause zero provider I/O', async (t) => {
   assert.equal(response.status, 401)
   assert.equal(upstream.requests.length, 0)
   assert.equal(relay.stats.forwarded, 0)
+})
+
+test('streams the first provider chunk before provider completion', async (t) => {
+  let firstSentResolve
+  const firstSent = new Promise(resolve => { firstSentResolve = resolve })
+  let releaseFinal
+  const finalReleased = new Promise(resolve => { releaseFinal = resolve })
+  const providerServer = createServer(async (request, response) => {
+    for await (const _ of request) { /* consume */ }
+    response.writeHead(200, { 'content-type': 'application/x-ndjson' })
+    response.write('{"delta":"first"}\n')
+    firstSentResolve()
+    await finalReleased
+    response.end('{"delta":"final"}\n')
+  })
+  await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => providerServer.close(() => resolve())))
+  const relay = await createAcpModelRelay({
+    engineId: 'qwen-0.24.0', getIdentity: () => identity, launchId: 'launch-stream', model: 'synthetic-model',
+    providerEndpoint: `http://127.0.0.1:${providerServer.address().port}/v1/chat/completions`, providerKey: 'provider-only-key', sessionId: 'session-stream',
+    gateway: { validate: async input => ({ active: true, expiresAt: future, subject: input.subject }) },
+  })
+  t.after(() => relay.dispose())
+  const response = await fetch(`${relay.endpoint}/chat/completions`, {
+    body: JSON.stringify({ model: 'synthetic-model' }),
+    headers: { authorization: `Bearer ${relay.capability}`, 'content-type': 'application/json' }, method: 'POST',
+  })
+  await firstSent
+  const reader = response.body.getReader()
+  const first = await reader.read()
+  assert.match(Buffer.from(first.value).toString('utf8'), /first/)
+  releaseFinal()
+  let remainder = ''
+  for (;;) {
+    const chunk = await reader.read()
+    if (chunk.done) break
+    remainder += Buffer.from(chunk.value).toString('utf8')
+  }
+  assert.match(remainder, /final/)
 })
 
 test('disposal aborts active provider I/O and closes the relay listener', async (t) => {

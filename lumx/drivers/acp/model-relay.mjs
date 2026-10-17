@@ -1,9 +1,11 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { once } from 'node:events'
 import { createServer } from 'node:http'
 
 import { admitLumxByok, LumxByokAdmissionError } from '../../identity/byok-admission.mjs'
 
 const MAX_BODY_BYTES = 1024 * 1024
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 const FORWARD_TIMEOUT_MS = 30_000
 
 function loopbackEndpoint(value, name) {
@@ -37,6 +39,18 @@ function json(response, status, value) {
   response.end(JSON.stringify(value))
 }
 
+async function pipeResponse(upstream, response, signal) {
+  let size = 0
+  response.writeHead(upstream.status, { 'content-type': upstream.headers.get('content-type') ?? 'application/json' })
+  if (upstream.body === null) return response.end()
+  for await (const chunk of upstream.body) {
+    size += chunk.byteLength
+    if (size > MAX_RESPONSE_BYTES) throw new Error('relay provider response exceeds the fixed limit')
+    if (!response.write(chunk)) await once(response, 'drain', { signal })
+  }
+  response.end()
+}
+
 /**
  * Product-owned, launch-scoped OpenAI-compatible model relay. Identity is
  * revalidated for every operation and every HTTP forwarding attempt.
@@ -59,6 +73,12 @@ export async function createAcpModelRelay(options) {
     if (!lifecycle.accepting) throw new Error('LUMX ACP relay is disposed')
     if (!['create', 'resume', 'prompt', 'forward'].includes(operation)) throw new Error('unsupported ACP relay operation')
     const identity = options.getIdentity()
+    const snapshot = identity === undefined ? undefined : Object.freeze({
+      credential: identity.credential,
+      expiresAt: identity.expiresAt,
+      subject: identity.subject,
+      type: identity.type,
+    })
     let result
     try {
       result = await admitLumxByok({ byokKey: options.providerKey, gateway: options.gateway, identity })
@@ -69,9 +89,9 @@ export async function createAcpModelRelay(options) {
     }
     if (!lifecycle.accepting) throw new Error('LUMX ACP relay is disposed')
     const current = options.getIdentity()
-    if (current === undefined || identity === undefined
-      || current.type !== identity.type || current.subject !== identity.subject
-      || current.credential !== identity.credential || current.expiresAt !== identity.expiresAt
+    if (current === undefined || snapshot === undefined
+      || current.type !== snapshot.type || current.subject !== snapshot.subject
+      || current.credential !== snapshot.credential || current.expiresAt !== snapshot.expiresAt
       || Date.parse(current.expiresAt) <= Date.now()) {
       stats.deniedOperations += 1
       throw new LumxByokAdmissionError('identity_rejected')
@@ -108,9 +128,7 @@ export async function createAcpModelRelay(options) {
           signal: controller.signal,
         })
         stats.providerResponses += 1
-        const responseBody = Buffer.from(await upstream.arrayBuffer())
-        response.writeHead(upstream.status, { 'content-type': upstream.headers.get('content-type') ?? 'application/json' })
-        response.end(responseBody)
+        await pipeResponse(upstream, response, controller.signal)
       } finally {
         clearTimeout(timer)
         request.off('aborted', abortForward)
