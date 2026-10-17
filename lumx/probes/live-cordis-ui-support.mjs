@@ -125,18 +125,16 @@ async function connectWorkspace(page, workspace) {
 }
 
 export async function locateDurableSession(page, expected = ACP_RESPONSE) {
-  const expectedResponse = page.getByText(expected, { exact: true }).first()
-  if (await expectedResponse.count() > 0
-    && await expectedResponse.waitFor({ state: 'visible', timeout: 2_000 }).then(() => true).catch(() => false)) return true
-  const rows = page.locator('[role="treeitem"]')
-  for (let index = 0; index < await rows.count(); index += 1) {
-    try {
-      await rows.nth(index).click({ timeout: 2_000 })
-      await expectedResponse.waitFor({ state: 'visible', timeout: 2_000 })
-      return true
-    } catch {}
-  }
-  return false
+  const tree = page.getByRole('tree', { name: 'Sessions', exact: true })
+  await tree.waitFor({ state: 'visible', timeout: 15_000 })
+  const group = tree.locator('[role="treeitem"][aria-expanded]').filter({ hasText: 'workspace' }).first()
+  await group.waitFor({ state: 'visible', timeout: 15_000 })
+  if (await group.getAttribute('aria-expanded') !== 'true') await group.click({ timeout: 5_000 })
+  const session = tree.getByRole('treeitem').filter({ hasText: ACP_PROMPT }).first()
+  await session.waitFor({ state: 'visible', timeout: 15_000 })
+  await session.click({ timeout: 5_000 })
+  await page.getByText(expected, { exact: true }).first().waitFor({ state: 'visible', timeout: 15_000 })
+  return true
 }
 
 export async function createBrowserState(options, runtime, acp, cancelBarrier) {
