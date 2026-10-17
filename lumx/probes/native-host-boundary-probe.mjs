@@ -54,6 +54,9 @@ const canaryPath = argument('--canary')
 const root = dirname(output)
 const osHome = join(root, 'os-home'); const workspace = join(root, 'workspace')
 mkdirSync(osHome, { recursive: true, mode: 0o700 }); mkdirSync(workspace, { recursive: true, mode: 0o700 })
+const consumerHome = join(osHome, '.lumx'); mkdirSync(consumerHome, { mode: 0o700 })
+const siblingCanary = join(consumerHome, 'consumer-account-canary'); writeFileSync(siblingCanary, 'consumer-secret\n', { mode: 0o600 })
+const osHomeCanary = join(osHome, 'os-home-canary'); writeFileSync(osHomeCanary, 'os-home-secret\n', { mode: 0o600 })
 const canaryBytes = readFileSync(canaryPath)
 const canaryStat = fstatSync(3)
 const positional = Buffer.alloc(canaryBytes.length)
@@ -76,7 +79,8 @@ try {
       gateway: { validate: async value => ({ active: true, expiresAt: identity?.expiresAt, subject: value.subject }) },
       getIdentity: () => identity,
     },
-    fdQualification: { canary, targets: TARGETS }, forkRoot: FORK, launchId: randomUUID(), mode: 'developer',
+    fdQualification: { canary, protectedPaths: [siblingCanary, osHomeCanary], targets: TARGETS },
+    forkRoot: FORK, launchId: randomUUID(), mode: 'developer',
     nodePath: NODE, nodeSha256: NODE_SHA256, osHome, port: await freePort(), sourceRoot: SOURCE,
     workspaceDirectory: workspace,
   })
@@ -95,6 +99,7 @@ try {
     childObservation: host.childFdObservation, configSha256: host.configSha256, denied, execution: host.execution,
     hostObservation: host.fdObservation, hostProfile: { bytes: host.hostProfile.bytes, sha256: host.hostProfile.sha256 },
     oldDirect, positive, providerRequests, readyStatus: ready.status, repeatedShutdownSamePromise, shutdown,
+    protectedPathErrors: host.protectedPathErrors,
     supportedChain: ['native-adversarial-parent', 'supervisor', 'native-bootstrap', 'sandbox-exec', 'fresh-node-host'],
     unauthorizedProviderIo: providerRequests - providerRequestsAfterPositive,
   }, null, 2)}\n`, { mode: 0o600 })

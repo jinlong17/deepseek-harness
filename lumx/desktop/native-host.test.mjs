@@ -57,6 +57,7 @@ test('native adversarial descriptors are closed by the supported Host chain', { 
   assert.equal(evidence.hostObservation.some(value => value.canaryRecovered), false)
   assert.equal(evidence.childObservation.observations.some(value => value.canaryRecovered), false)
   assert.equal(evidence.oldDirect.observations[0].canaryRecovered, true)
+  assert.deepEqual(Object.values(evidence.protectedPathErrors), ['EPERM', 'EPERM'])
   assert.equal(evidence.readyStatus, 303)
   assert.equal(evidence.positive.status, 'pass')
   assert.equal(evidence.denied.status, 'fail')

@@ -59,21 +59,24 @@ function withAbort(promise, signal) {
 /** Launch the supported LUMX Host in a fresh native-bootstrap/sandbox/Node process. */
 export async function launchLumxHost(input) {
   input.signal?.throwIfAborted()
+  if (input.mode !== 'consumer' && input.mode !== 'developer') throw new Error('Host mode is invalid')
   const nodePath = plainFile(input.nodePath, 'Node executable')
   if (sha256File(nodePath) !== input.nodeSha256) throw new Error('Node executable differs from caller anchor')
   const sourceRoot = realpathSync(input.sourceRoot)
   const forkRoot = realpathSync(input.forkRoot)
   const osHome = realpathSync(input.osHome)
   const workspaceDirectory = realpathSync(input.workspaceDirectory)
+  const dataHome = join(osHome, input.mode === 'developer' ? '.lumx-developer' : '.lumx')
   const port = tcpPort(input.port)
   const environment = launchEnvironment(input.environment)
   const model = loopback(input.auth.endpoint, 'model endpoint')
-  const runtime = realpathSync(mkdtempSync(join(input.runtimeParent ?? tmpdir(), 'lumx-host-')))
-  const processHome = join(runtime, 'home'); const temporary = join(runtime, 'tmp')
-  mkdirSync(processHome, { mode: 0o700 }); mkdirSync(temporary, { mode: 0o700 })
-  const bootstrap = buildLumxNativeBootstrap(join(runtime, 'lumx-bootstrap'))
+  let runtime
   let relay
   try {
+    runtime = realpathSync(mkdtempSync(join(input.runtimeParent ?? tmpdir(), 'lumx-host-')))
+    const processHome = join(runtime, 'home'); const temporary = join(runtime, 'tmp')
+    mkdirSync(processHome, { mode: 0o700 }); mkdirSync(temporary, { mode: 0o700 })
+    const bootstrap = buildLumxNativeBootstrap(join(runtime, 'lumx-bootstrap'))
     relay = await createAcpModelRelay({
       engineId: 'dsh-host', gateway: input.auth.gateway, getIdentity: input.auth.getIdentity,
       launchId: input.launchId, model: 'lumx-loopback', providerEndpoint: model.url,
@@ -81,7 +84,7 @@ export async function launchLumxHost(input) {
     })
     const relayPort = Number(new URL(relay.endpoint).port)
     const profile = createLumxHostSandboxProfile({
-      forkRoot, nodePath, osHome, runtime, sourceRoot, workspaceDirectory, ports: [port, relayPort],
+      dataHome, forkRoot, nodePath, runtime, sourceRoot, workspaceDirectory, ports: [port, relayPort],
     })
     const profilePath = join(runtime, 'lumx-host.sb')
     writeFileSync(profilePath, profile, { mode: 0o600 })
@@ -91,6 +94,7 @@ export async function launchLumxHost(input) {
       modelEndpoint: `${relay.endpoint}/chat/completions`, relayCapability: relay.capability,
       fdTargets: input.fdQualification?.targets ?? [0, 3, 10, 11, 512],
       canary: input.fdQualification?.canary ?? { path: join(runtime, 'absent-canary'), dev: -1, ino: -1, bytes: 0, sha256: sha256('') },
+      protectedPaths: input.fdQualification?.protectedPaths ?? [],
     }
     const config = { version: 1, configSha256: sha256(Buffer.from(JSON.stringify(payload))), payload }
     const configPath = join(runtime, 'host-config.json')
@@ -132,6 +136,8 @@ export async function launchLumxHost(input) {
       const startup = withTimeout(ready, input.startupTimeoutMs ?? 30_000, 'Host startup')
       readyValue = await withAbort(startup, input.signal)
     } catch (error) {
+      child.stdin.end()
+      await Promise.race([exited, new Promise(resolveWait => setTimeout(resolveWait, 250))])
       if (Number.isSafeInteger(child.pid)) { try { process.kill(-child.pid, 'SIGTERM') } catch {} }
       await Promise.race([exited, new Promise(resolveWait => setTimeout(resolveWait, 2_000))])
       if (Number.isSafeInteger(child.pid)) { try { process.kill(-child.pid, 'SIGKILL') } catch {} }
@@ -142,13 +148,23 @@ export async function launchLumxHost(input) {
     }
     let stopping
     const stop = command => (stopping ??= (async () => {
-      if (command !== undefined) child.stdin.write(`${command}\n`)
-      child.stdin.end()
-      let outcome = await Promise.race([exited, new Promise(resolveWait => setTimeout(() => resolveWait(undefined), 10_000))])
-      if (outcome === undefined) { try { process.kill(-child.pid, 'SIGTERM') } catch {}; outcome = await withTimeout(exited, 2_000, 'Host reap') }
-      await relay.dispose()
-      rmSync(runtime, { recursive: true, force: true })
-      return outcome
+      try {
+        if (command !== undefined) child.stdin.write(`${command}\n`)
+        child.stdin.end()
+        let outcome = await Promise.race([exited, new Promise(resolveWait => setTimeout(() => resolveWait(undefined), 10_000))])
+        if (outcome === undefined) {
+          try { process.kill(-child.pid, 'SIGTERM') } catch {}
+          outcome = await Promise.race([exited, new Promise(resolveWait => setTimeout(() => resolveWait(undefined), 2_000))])
+        }
+        if (outcome === undefined) {
+          try { process.kill(-child.pid, 'SIGKILL') } catch {}
+          outcome = await withTimeout(exited, 2_000, 'Host reap after SIGKILL')
+        }
+        return outcome
+      } finally {
+        await relay.dispose().catch(() => {})
+        rmSync(runtime, { recursive: true, force: true })
+      }
     })())
     const shutdown = () => stop('{"command":"shutdown"}')
     const disconnect = () => stop(undefined)
@@ -171,11 +187,12 @@ export async function launchLumxHost(input) {
       childFdObservation: readyValue.childFdObservation, hostProfile: { bytes: profile, path: profilePath, sha256: sha256(profile) },
       execution: Object.freeze({ argv: Object.freeze([bootstrap, '/usr/bin/sandbox-exec', ...argv]), envKeys: Object.freeze(['HOME', 'LANG', 'LC_ALL', 'NO_COLOR', 'PATH', 'TMPDIR']) }),
       pid: child.pid, process: Object.freeze({ pid: child.pid }), readyUrl: readyValue.readyUrl,
+      protectedPathErrors: readyValue.protectedPathErrors,
       shutdown, stderr: () => stderr, stdout: () => [...stdout],
     })
   } catch (error) {
     await relay?.dispose().catch(() => {})
-    rmSync(runtime, { recursive: true, force: true })
+    if (runtime !== undefined) rmSync(runtime, { recursive: true, force: true })
     throw error
   }
 }

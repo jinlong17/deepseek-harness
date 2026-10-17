@@ -11,9 +11,9 @@ function parents(path) {
 }
 
 /** Exact product Host profile grants retained from the original live Host runner. */
-export function createLumxHostSandboxProfile({ forkRoot, nodePath, osHome, runtime, sourceRoot, workspaceDirectory, ports }) {
+export function createLumxHostSandboxProfile({ dataHome, forkRoot, nodePath, runtime, sourceRoot, workspaceDirectory, ports }) {
   const readable = [forkRoot, sourceRoot, dirname(dirname(nodePath))]
-  const writable = [runtime, osHome, workspaceDirectory]
+  const writable = [runtime, dataHome, workspaceDirectory]
   const lines = [
     '(version 1)', '(deny default)', '(deny network*)', '(allow process*)', '(allow sysctl-read)',
     '(allow file-read* (literal "/"))', '(allow file-read-metadata (literal "/tmp"))',

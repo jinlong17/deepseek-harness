@@ -55,11 +55,37 @@ const shutdown = () => (stopping ??= (async () => {
   await runtime?.shutdown()
   process.stdout.write(`${JSON.stringify({ type: 'stopped' })}\n`)
 })())
+const control = createInterface({ input: process.stdin, crlfDelay: Infinity })
+control.on('line', line => {
+  if (line === '{"command":"shutdown"}') void shutdown().then(() => process.exit(0), () => process.exit(1))
+  else {
+    let command
+    try { command = JSON.parse(line) } catch { return }
+    if (command?.command === 'health' && typeof command.id === 'string') {
+      void healthCheck().then(
+        value => process.stdout.write(`${JSON.stringify({ type: 'health', id: command.id, status: 'pass', ...value })}\n`),
+        error => process.stdout.write(`${JSON.stringify({ type: 'health', id: command.id, status: 'fail', error: error instanceof Error ? error.message : String(error) })}\n`),
+      )
+    } else if (command?.command === 'inspect-session' && typeof command.id === 'string'
+      && typeof command.sessionId === 'string' && /^[0-9a-f-]{36}$/u.test(command.sessionId)) {
+      void runtime.ctx.sessionController.inspect(command.sessionId, new AbortController().signal).then(
+        value => process.stdout.write(`${JSON.stringify({ type: 'inspect-session', id: command.id, status: 'pass', eventCount: value.events.length, sessionId: command.sessionId })}\n`),
+        error => process.stdout.write(`${JSON.stringify({ type: 'inspect-session', id: command.id, status: 'fail', error: error instanceof Error ? error.message : String(error) })}\n`),
+      )
+    }
+  }
+})
+control.on('close', () => { void shutdown().then(() => process.exit(0), () => process.exit(1)) })
+process.once('SIGTERM', () => { void shutdown().then(() => process.exit(0), () => process.exit(1)) })
 try {
   const fdObservation = observeFileDescriptors(input.fdTargets, input.canary)
   const childFdObservation = await childObservation(input.nodePath, { targets: input.fdTargets, canary: input.canary })
   let pathError
   try { readFileSync(input.canary.path) } catch (error) { pathError = error.code ?? error.name }
+  const protectedPathErrors = {}
+  for (const path of input.protectedPaths) {
+    try { readFileSync(path); protectedPathErrors[path] = 'READABLE' } catch (error) { protectedPathErrors[path] = error.code ?? error.name }
+  }
   runtime = await launchLumxRuntimeInProcess({
     mode: input.mode, osHome: input.osHome, workspaceDirectory: input.workspaceDirectory,
     sourceRoot: input.sourceRoot, port: input.port, environment: input.environment,
@@ -67,32 +93,10 @@ try {
   })
   process.stdout.write(`${JSON.stringify({
     type: 'ready', pid: process.pid, baseUrl: runtime.baseUrl, readyUrl: runtime.readyUrl,
-    fdObservation, childFdObservation, canaryPathError: pathError, configSha256: sha256(configBytes),
+    fdObservation, childFdObservation, canaryPathError: pathError, protectedPathErrors, configSha256: sha256(configBytes),
   })}\n`)
-  const control = createInterface({ input: process.stdin, crlfDelay: Infinity })
-  control.on('line', line => {
-    if (line === '{"command":"shutdown"}') void shutdown().then(() => process.exit(0), () => process.exit(1))
-    else {
-      let command
-      try { command = JSON.parse(line) } catch { return }
-      if (command?.command === 'health' && typeof command.id === 'string') {
-        void healthCheck().then(
-          value => process.stdout.write(`${JSON.stringify({ type: 'health', id: command.id, status: 'pass', ...value })}\n`),
-          error => process.stdout.write(`${JSON.stringify({ type: 'health', id: command.id, status: 'fail', error: error instanceof Error ? error.message : String(error) })}\n`),
-        )
-      } else if (command?.command === 'inspect-session' && typeof command.id === 'string'
-        && typeof command.sessionId === 'string' && /^[0-9a-f-]{36}$/u.test(command.sessionId)) {
-        void runtime.ctx.sessionController.inspect(command.sessionId, new AbortController().signal).then(
-          value => process.stdout.write(`${JSON.stringify({ type: 'inspect-session', id: command.id, status: 'pass', eventCount: value.events.length, sessionId: command.sessionId })}\n`),
-          error => process.stdout.write(`${JSON.stringify({ type: 'inspect-session', id: command.id, status: 'fail', error: error instanceof Error ? error.message : String(error) })}\n`),
-        )
-      }
-    }
-  })
-  control.on('close', () => { void shutdown().then(() => process.exit(0), () => process.exit(1)) })
-  process.once('SIGTERM', () => { void shutdown().then(() => process.exit(0), () => process.exit(1)) })
 } catch (error) {
   await shutdown().catch(() => {})
   process.stderr.write(`lumx-host-entry:${error instanceof Error ? error.message : String(error)}\n`)
-  process.exitCode = 1
+  process.exit(1)
 }

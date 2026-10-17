@@ -69,7 +69,8 @@ test('startup failure, timeout, and cancellation reap the native process and run
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const value = await fixture(root, 'startup')
   t.after(value.close)
-  await assert.rejects(value.launch({ mode: 'invalid' }), /Host exited before readiness|Host exited/)
+  const missingBuild = join(root, 'missing-build'); mkdirSync(missingBuild)
+  await assert.rejects(value.launch({ runtimeParent, sourceRoot: missingBuild }), /Host exited before readiness|Host exited/)
   assert.deepEqual(readdirSync(runtimeParent), [])
   await assert.rejects(value.launch({ runtimeParent, startupTimeoutMs: 1 }), /Host startup timed out/)
   assert.deepEqual(readdirSync(runtimeParent), [])
@@ -78,6 +79,16 @@ test('startup failure, timeout, and cancellation reap the native process and run
   setTimeout(() => controller.abort(new Error('cancel-during-boot')), 25)
   await assert.rejects(pending, /cancel-during-boot/)
   assert.deepEqual(readdirSync(runtimeParent), [])
+})
+
+test('stubborn stopped Host is killed, reaped, and cleaned after bounded shutdown', { timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'lumx-host-stubborn-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const value = await fixture(root, 'stubborn')
+  t.after(value.close)
+  const host = await value.launch()
+  process.kill(host.pid, 'SIGSTOP')
+  assert.deepEqual(await host.shutdown(), { code: null, signal: 'SIGKILL' })
 })
 
 test('two native Hosts isolate controls and persisted sessions survive a real process restart', { timeout: 90_000 }, async t => {
