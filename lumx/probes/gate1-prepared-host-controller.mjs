@@ -70,15 +70,16 @@ function verifyAck(ack, ready) {
   const wanted = Object.fromEntries(ready.materials.map(value => [value.material_id, value.sha256]))
   if (canonical(ack.material_sha256) !== canonical(wanted)) throw new Error('ACK material hash mismatch')
 }
-function verifyOwnershipAck(ack, owner, ready, runtimeAnchorSha256) {
-  if (ack?.schema !== 'g9-b5-host-ownership-ack/v1' || !same(ack.nonce ?? '', owner.nonce)
-    || !same(ack.source_anchor_sha256 ?? '', ready.source_anchor_sha256)
-    || !same(ack.preparation_anchor_sha256 ?? '', ready.preparation_anchor_sha256)
-    || !same(ack.runtime_anchor_sha256 ?? '', runtimeAnchorSha256)
-    || ack.host_pid !== owner.host_pid || ack.host_pgid !== owner.host_pgid) {
+function verifyOwnershipAck(ack, owner) {
+  const keys = Object.keys(ack ?? {}).sort().join(',')
+  if (keys !== 'generation,nonce,pid,pgid,runtime_anchor_sha256,schema'
+    || ack.schema !== 'g9-b5-host-owner-ack/v1' || !same(ack.nonce ?? '', owner.nonce)
+    || !same(ack.runtime_anchor_sha256 ?? '', owner.runtime_anchor_sha256)
+    || !same(ack.generation ?? '', owner.generation) || ack.pid !== owner.pid || ack.pgid !== owner.pgid) {
     throw new Error('Host ownership ACK identity mismatch')
   }
 }
+
 async function cleanup(retained, host, primary) {
   const failures = []
   if (host !== undefined) try { await host.shutdown() } catch (error) { failures.push(error) }
@@ -133,15 +134,16 @@ async function main() {
       if (!Number.isSafeInteger(owner?.pid) || !Number.isSafeInteger(owner?.pgid) || owner.pid !== owner.pgid) {
         throw new Error('Host ownership identity is invalid')
       }
-      ownership = Object.freeze({ schema: 'g9-b5-host-ownership/v1', nonce: randomBytes(32).toString('hex'),
-        source_anchor_sha256: source, preparation_anchor_sha256: preparation, runtime_anchor_sha256: ackFrame.runtime_anchor_sha256,
-        host_pid: owner.pid, host_pgid: owner.pgid })
+      ownership = Object.freeze({ schema: 'g9-b5-host-owner/v1', nonce: randomBytes(32).toString('hex'),
+        runtime_anchor_sha256: ackFrame.runtime_anchor_sha256, consumer, generation: retained.payload.generation,
+        config_sha256: retained.anchors.configFileSha256, profile_sha256: retained.anchors.profileSha256,
+        pid: owner.pid, pgid: owner.pgid })
       await write(ready, ownership)
-      verifyOwnershipAck(await read(ack, ackTimeout(args['ack-timeout-ms'])), ownership, readyFrame, ackFrame.runtime_anchor_sha256)
+      verifyOwnershipAck(await read(ack, ackTimeout(args['ack-timeout-ms'])), ownership)
     } })
     if (typeof factory.runB5HostScenario !== 'function') throw new Error('scenario runner required')
     const qualification = Object.freeze({ consumer, host: Object.freeze({ configSha256: host.configSha256, generation: host.generation, pid: host.pid,
-      pgid: ownership.host_pgid, profileSha256: host.hostProfile.sha256, role }), materials: Object.freeze(rows.map(value => Object.freeze({
+      pgid: ownership.pgid, profileSha256: host.hostProfile.sha256, role }), materials: Object.freeze(rows.map(value => Object.freeze({
       materialId: value.material_id, materialType: value.material_type, role: value.role, sha256: value.sha256,
     }))), runtimeAnchorSha256: ackFrame.runtime_anchor_sha256 })
     await factory.runB5HostScenario({ host, qualification, runtimeAnchorSha256: ackFrame.runtime_anchor_sha256 })
