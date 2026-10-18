@@ -60,8 +60,21 @@ test('owner ACK rejects each authenticated identity mismatch', () => {
   rejects(ack({ pgid: owner.pgid + 1 }))
 })
 
-test('owner ACK rejects non-object and array forms with the stable error', () => {
+test('owner ACK rejects non-string identity values without changing its error', () => {
+  for (const key of ['nonce', 'runtime_anchor_sha256', 'generation']) {
+    rejects(ack({ [key]: 1 }))
+    rejects(ack({ [key]: Buffer.from(owner[key]) }))
+    rejects(ack({ [key]: { value: owner[key] } }))
+  }
+  rejects(ack({ pid: String(owner.pid) }))
+  rejects(ack({ pgid: String(owner.pgid) }))
+})
+
+test('owner ACK rejects null, arrays, primitives, and arrays with schema-like keys', () => {
   rejects(null)
   rejects([])
   rejects('owner-ack')
+  const schemaLikeArray = []
+  Object.assign(schemaLikeArray, ack())
+  rejects(schemaLikeArray)
 })
