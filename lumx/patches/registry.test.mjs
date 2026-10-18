@@ -6,13 +6,13 @@ import { assertProductPatchBudget, listProductPatches, PATCH_BUDGET } from './re
 test('product patches fit the desktop budget and record their removal path', () => {
   assert.doesNotThrow(assertProductPatchBudget)
   const patches = listProductPatches()
-  assert.equal(patches.length, 10)
+  assert.equal(patches.length, 11)
   assert.equal(PATCH_BUDGET, 12)
   assert.match(patches[0].removal, /Remove/)
   assert.deepEqual(patches[0].removalPaths, ['lumx/desktop/', 'lumx/identity/', 'lumx/patches/registry.mjs'])
   assert.match(patches[0].tests.join('\n'), /node --test/)
   assert.deepEqual(patches.map(patch => patch.id), [
-    'G9-1-B1', 'G9-1-B2', 'G9-1-P4', 'G9-1-P5', 'G9-1-P6', 'G9-1-P7', 'G9-1-P8', 'G9-1-P9', 'G9-1-P10', 'G9-1-P3',
+    'G9-1-B1', 'G9-1-B2', 'G9-1-P4', 'G9-1-P5', 'G9-1-P6', 'G9-1-P7', 'G9-1-P8', 'G9-1-P9', 'G9-1-P10', 'G9-1-P11', 'G9-1-P3',
   ])
   assert.deepEqual(patches[1].removalPaths, ['lumx/runtime/', 'lumx/patches/registry.mjs'])
   assert.match(patches[5].purpose, /Broker-only/)
@@ -20,5 +20,7 @@ test('product patches fit the desktop budget and record their removal path', () 
   assert.match(patches[6].removalPaths.join('\n'), /external-engine-owner/)
   assert.match(patches[7].purpose, /ownership refusal/)
   assert.match(patches[8].purpose, /eligibility receipt/)
-  assert.match(patches[9].tests.join('\n'), /native-host/)
+  assert.match(patches[9].purpose, /qualification-only/)
+  assert.match(patches[9].files.join('\n'), /b5-client-build-environment-helper/)
+  assert.match(patches[10].tests.join('\n'), /native-host/)
 })
