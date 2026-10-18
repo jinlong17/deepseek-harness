@@ -20,14 +20,14 @@ async function runtime(t, engine, root) {
   return { ctx, owner, router }
 }
 function fakeEngine() {
-  const calls = { create: 0, dispose: 0, load: 0, prompt: 0 }; let serial = 0
+  const calls = { create: 0, dispose: 0, load: 0, prompt: 0 }; const nativeByHandle = new Map(); let serial = 0
   return {
     calls,
-    async create(_input, { handleId }) { calls.create += 1; return { nativeSessionId: `native-${++serial}`, handleId } },
-    async load({ nativeSessionId }) { calls.load += 1; return { nativeSessionId } },
+    async create(_input, { handleId }) { calls.create += 1; const nativeSessionId = `native-${++serial}`; nativeByHandle.set(handleId, nativeSessionId); return { nativeSessionId, handleId } },
+    async load({ nativeSessionId }, { handleId }) { calls.load += 1; nativeByHandle.set(handleId, nativeSessionId); return { nativeSessionId } },
     async prompt(_input, { handleId, promptId }) {
       calls.prompt += 1
-      await this.router.onUpdate({ handleId, promptId, params: { sessionId: `native-${serial}`, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'external answer' } } } })
+      await this.router.onUpdate({ handleId, promptId, params: { sessionId: nativeByHandle.get(handleId), update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'external answer' } } } })
       return { result: { stopReason: 'end_turn' } }
     },
     async cancel() {}, async dispose() { calls.dispose += 1 },
@@ -143,9 +143,15 @@ test('resume durably repairs an interrupted external turn before native load', a
     'agent/external-engine-bound', 'turn/start', 'turn/end', 'session/end-seed',
   ])
   assert.deepEqual(loaded.agent.session.snapshotEvents()[2].data.reason, { kind: 'interrupted' })
+  loaded.agent.followup(user()); await loaded.agent.whenIdle(); await second.ctx.sessionPersistence.flush()
   await loaded.dispose(); await second.owner.close(); await second.ctx.fiber.dispose()
 
   const verify = await runtime(t, fakeEngine(), root); const storage = await verify.ctx.sessionPersistence.open('interrupted-external', 'read')
   const stored = await storage.read(); await storage.close()
-  assert.deepEqual(stored.events.map(event => event.type), ['agent/external-engine-bound', 'turn/start', 'turn/end'])
+  assert.deepEqual(stored.events.map(event => event.type), [
+    'agent/external-engine-bound', 'turn/start', 'turn/end', 'session/end-seed',
+    'agent/inbox/spliced', 'turn/start', 'agent/inbox/spliced', 'step/start', 'user/message',
+    'assistant/message', 'step/end', 'turn/end',
+  ])
+  assert.deepEqual(stored.events.map(event => event.seq), stored.events.map((_, index) => index))
 })

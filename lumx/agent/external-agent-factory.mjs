@@ -46,7 +46,7 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engin
     const sessionId = mode === 'create' ? options.sessionId : options.resumeSessionId
     let session = mode === 'create' ? ctx.sessions.prepare(sessionId, { ...options.seed === undefined ? {} : { seed: options.seed },
       ...options.meta === undefined ? {} : { meta: options.meta }, ...options.inheritedEventCount === undefined ? {} : { inheritedEventCount: options.inheritedEventCount } }) : undefined
-    let storage; let handleId; let agent; let detachSession; let detachAgent; let detachRoute; let published = false
+    let storage; let handleId; let agent; let detachSession; let detachAgent; let detachRoute; let persistedCount = 0; let published = false
     try {
       storage = mode === 'create' ? await persistence.create(session.header, { signal }) : await persistence.open(sessionId, 'write', { signal })
       assertTransaction()
@@ -57,6 +57,7 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engin
         bindingOf(read.events, { artifactIdentity, engineId })
         const closers = interruptedTurnClosers(read.events)
         if (closers.length > 0) await storage.append(closers, { signal })
+        persistedCount = read.events.length + closers.length
         session = ctx.sessions.prepare(sessionId, { seed: [...read.events, ...closers], meta: storage.header,
           inheritedEventCount: storage.inheritedEventCount, eventState: read.eventState })
       }
@@ -71,8 +72,7 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engin
       detachRoute = router.attach(handleId, agent)
       const setupCommit = await options.setup?.(agent.ctx, agent); assertTransaction()
       if (mode === 'create') session.append('agent/external-engine-bound', { version: 1, engineId, nativeSessionId: engineSession.nativeSessionId, artifactIdentity })
-      const storedCount = mode === 'create' ? 0 : session.seq
-      const suffix = session.snapshotEvents(storedCount)
+      const suffix = session.snapshotEvents(persistedCount)
       if (suffix.length > 0) await storage.append(suffix, { signal })
       await storage.flush({ signal }); assertTransaction()
 
