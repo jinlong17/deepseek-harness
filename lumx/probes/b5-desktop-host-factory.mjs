@@ -31,17 +31,17 @@ export async function makeB5HostLaunchInput({ consumer, sourceAnchorSha256 }) {
       getIdentity: () => identity } }
   return { launchInput, sourceAnchorSha256 }
 }
-async function alternate(host, runtimeAnchorSha256) {
+async function alternate(host, runtimeAnchorSha256, qualification) {
   const observed = await host.control.qualify({ operation: 'byok-alternate' })
   const facts = observed.facts; const anonymous = config.scenario.endsWith('anonymous')
   const id = anonymous ? 'byok-other-adapter-anonymous-blocked' : 'byok-other-adapter-positive'
   const pass = anonymous ? facts.adapterCalls === 0 && facts.failure?.code === 'identity_required'
     : facts.adapterCalls === 1 && facts.chunks.at(-1)?.type === 'finish'
-  writeResult(config, { runtimeAnchorSha256, observations: { qualification: observed }, counted_results: [unit('real/developer-Host-positive', [check(id, pass, facts)], 'actual supported Host fixed synthetic alternate adapter admission')] })
+  writeResult(config, { runtimeAnchorSha256, qualification, observations: { qualification: observed }, counted_results: [unit('real/developer-Host-positive', [check(id, pass, facts)], 'actual supported Host fixed synthetic alternate adapter admission')] })
 }
 export async function runB5HostScenario({ host, runtimeAnchorSha256, qualification }) {
   return withB5FactoryCleanup(closeB5HostFactory, async () => {
-    if (config.scenario !== 'desktop-main') return await alternate(host, runtimeAnchorSha256)
+    if (config.scenario !== 'desktop-main') return await alternate(host, runtimeAnchorSha256, qualification)
     const auth = await authenticate(host.readyUrl); const page = await fetch(auth.page, { headers: { cookie: auth.cookie } })
     const wrongToken = await fetch(`${auth.origin}/?token=wrong`, { redirect: 'manual' })
     const api = `${auth.origin}/api/settings/openSettingsDocument`; const authority = new URL(auth.origin).host

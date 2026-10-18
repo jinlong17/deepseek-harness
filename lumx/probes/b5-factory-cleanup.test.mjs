@@ -116,6 +116,26 @@ test('each B5 factory closes prepared loopback resources idempotently before Hos
   await factoryCleanup('external-idle', 'b5-external-qwen-factory.mjs', 'external-create', 'external-qwen')
 })
 
+async function alternateQualification(scenario, facts) {
+  const state = await fixture(`alternate-${scenario}`, scenario)
+  const script = join(state.directory, 'alternate-child.mjs')
+  const qualification = { consumer: 'desktop-byok', materialProjection: [{ materialId: 'host-profile', role: 'host', sha256: 'd'.repeat(64) }] }
+  await writeFile(script, `import { readFileSync } from 'node:fs';
+import { makeB5HostLaunchInput, runB5HostScenario } from ${JSON.stringify(pathToFileURL(modulePath('b5-desktop-host-factory.mjs')).href)};
+const qualification = ${JSON.stringify(qualification)};
+await makeB5HostLaunchInput({ consumer: 'desktop-byok', sourceAnchorSha256: 'e'.repeat(64) });
+await runB5HostScenario({ host: { control: { qualify: async () => (${JSON.stringify(facts)}) } }, runtimeAnchorSha256: 'f'.repeat(64), qualification });
+process.stdout.write(readFileSync(${JSON.stringify(state.config.resultPath)}, 'utf8'));`)
+  const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])
+  assert.equal(result.code, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout).qualification, qualification)
+}
+
+test('desktop alternate results retain the received qualification for anonymous and valid fixtures', async () => {
+  await alternateQualification('desktop-alternate-anonymous', { facts: { adapterCalls: 0, failure: { code: 'identity_required' } } })
+  await alternateQualification('desktop-alternate-valid', { facts: { adapterCalls: 1, chunks: [{ type: 'finish' }] } })
+})
+
 test('an already-destroyed Qwen stream settles before provider close', async () => {
   const barriers = { streamActive: false, streamFirst: Promise.withResolvers(), streamRelease: Promise.withResolvers(), streamFinished: Promise.withResolvers(), cancelStarted: Promise.withResolvers(), cancelObserved: Promise.withResolvers() }
   let handler; let closes = 0
