@@ -10,7 +10,7 @@ import { sha256File, treeSha256 } from '../../build/candidate-manifest.mjs'
 import { createAcpModelRelay } from './model-relay.mjs'
 
 const WAIT_MS = 15_000
-const SETTINGS = `${JSON.stringify({
+export const QWEN_SETTINGS = `${JSON.stringify({
   privacy: { usageStatisticsEnabled: false },
   skills: { disabledLevels: ['project', 'user', 'extension', 'bundled'] },
   telemetry: { enabled: false, logPrompts: false },
@@ -27,7 +27,7 @@ function timeout(promise, label, ms = WAIT_MS) {
 }
 function sb(path) { return JSON.stringify(realpathSync(path)) }
 
-export function qwenSandboxProfile({ nodePath, qwenRoot, relayPort, runtime, workspace }) {
+export function qwenSandboxProfile({ nodePath, qwenRoot, relayPort, runtime, workspace, writable = [runtime], frozen = [] }) {
   return `${[
     '(version 1)', '(allow default)', '(deny network*)',
     '(allow file-read-metadata (literal "/"))',
@@ -36,7 +36,8 @@ export function qwenSandboxProfile({ nodePath, qwenRoot, relayPort, runtime, wor
     ...['/System', '/usr/lib', '/usr/share', '/usr/bin', '/bin', '/sbin', '/Library/Apple'].map(path => `(allow file-read* (subpath ${JSON.stringify(path)}))`),
     `(allow file-read* (subpath ${sb(dirname(dirname(nodePath)))}))`,
     `(allow file-read* (subpath ${sb(qwenRoot)}))`,
-    `(allow file-read* file-write* (subpath ${sb(runtime)}))`,
+    `(allow file-read* (subpath ${sb(runtime)}))`,
+    ...writable.map(path => `(allow file-write* (subpath ${sb(path)}))`),
     `(allow file-read* file-write* (subpath ${sb(workspace)}))`,
     `(allow network-outbound (remote tcp4 "localhost:${relayPort}"))`,
     ...[
@@ -46,6 +47,7 @@ export function qwenSandboxProfile({ nodePath, qwenRoot, relayPort, runtime, wor
     ].map(path => `(deny file-read* file-write* (subpath ${JSON.stringify(path)}))`),
     ...['/Users/jinlong/.codex/auth.json', '/Users/jinlong/.npmrc', '/Users/jinlong/.netrc']
       .map(path => `(deny file-read* file-write* (literal ${JSON.stringify(path)}))`),
+    ...frozen.map(path => `(deny file-write* (subpath ${sb(path)}))`),
   ].join('\n')}\n`
 }
 
@@ -135,7 +137,7 @@ function launchQwen(options, relay, paths) {
 function pathsUnder(runtime) {
   const paths = { runtime, home: join(runtime, 'home'), profile: join(runtime, 'engine.sb'), qwenHome: join(runtime, 'qwen-home'), tmp: join(runtime, 'tmp'), workspace: join(runtime, 'workspace') }
   for (const path of [paths.home, paths.qwenHome, paths.tmp, paths.workspace]) mkdirSync(path, { recursive: true, mode: 0o700 })
-  writeFileSync(join(paths.qwenHome, 'settings.json'), SETTINGS, { mode: 0o600 })
+  writeFileSync(join(paths.qwenHome, 'settings.json'), QWEN_SETTINGS, { mode: 0o600 })
   return paths
 }
 
@@ -200,7 +202,7 @@ export async function runQwenAcpFeasibility(options) {
       lifecycle: { allChildrenExited: attempts.every(attempt => attempt.exit.code !== null || attempt.exit.signal !== null), providerCancelObserved: providerAborted },
       relay: { forwarded: relay.stats.forwarded, providerResponses: relay.stats.providerResponses },
       settings: {
-        input: { bytes: SETTINGS, sha256: digest(SETTINGS) },
+        input: { bytes: QWEN_SETTINGS, sha256: digest(QWEN_SETTINGS) },
         persisted: { bytes: readFileSync(join(paths.qwenHome, 'settings.json'), 'utf8'), sha256: digest(readFileSync(join(paths.qwenHome, 'settings.json'))) },
       },
       updates: { first: firstUpdates.length, loaded: secondUpdates.length },

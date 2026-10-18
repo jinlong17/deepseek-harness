@@ -22,3 +22,15 @@ export function buildLumxNativeFdHarness(output) {
   chmodSync(output, 0o700)
   return output
 }
+
+/** Build the fixed EOF guardian used to reap one detached engine process group. */
+export function buildLumxNativeGuardian(output) {
+  const source = fileURLToPath(new URL('./guardian.c', import.meta.url))
+  const target = resolve(output)
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
+  execFileSync('/usr/bin/xcrun', ['clang', '-std=c17', '-O2', '-Wall', '-Wextra', '-Werror', source, '-o', target], {
+    env: { PATH: '/usr/bin:/bin' }, stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  chmodSync(target, 0o700)
+  return realpathSync(target)
+}
