@@ -84,7 +84,7 @@ export function createTypedPipe({ readable, writable, incomingDirection, outgoin
       const finish = error => {
         if (settledEnd) return
         settledEnd = true; clearTimeout(timer); writable.removeListener('error', onError); writable.removeListener('finish', onFinish)
-        if (error === undefined) resolveEnd(); else rejectEnd(error)
+        if (error == null) resolveEnd(); else rejectEnd(error)
       }
       const onError = error => finish(error)
       const onFinish = () => finish()
@@ -162,7 +162,7 @@ export function createTypedPipe({ readable, writable, incomingDirection, outgoin
             const finish = error => {
               if (settledWrite) return
               settledWrite = true; clearTimeout(timer); writable.removeListener('error', onError)
-              if (error === undefined) resolveWrite(); else rejectWrite(error)
+              if (error == null) resolveWrite(); else rejectWrite(error)
             }
             const onError = error => finish(error)
             const timer = setTimeout(() => finish(new Error('LUMX typed pipe write completion timed out')), WRITE_DEADLINE_MS)
