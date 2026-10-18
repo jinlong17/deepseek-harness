@@ -7,6 +7,7 @@ import { captureBoundedTail, createBoundedNdjsonInput } from './bounded-ndjson.m
 import { verifyQwenLaunch } from './qwen-launch-materials.mjs'
 
 const OPERATION_TIMEOUT_MS = 30_000
+const CALLBACK_LIMIT = 64
 const UPDATE_TYPES = new Set(['user_message_chunk', 'agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update', 'plan', 'plan_update', 'plan_removed', 'available_commands_update', 'current_mode_update', 'config_option_update', 'session_info_update', 'usage_update', 'compaction_update', 'compaction_summary_chunk'])
 const TURN_UPDATE_TYPES = new Set(['user_message_chunk', 'agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update', 'plan', 'plan_update', 'plan_removed', 'usage_update', 'compaction_update', 'compaction_summary_chunk'])
 function timeout(promise, label, ms = OPERATION_TIMEOUT_MS) {
@@ -82,6 +83,20 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
     if (handles.has(handleId) || reservations.has(handleId)) throw new Error('Qwen handle already exists')
     reservations.add(handleId)
   }
+  function callback(prompt, operation, fallback) {
+    if (!prompt.accepting) return Promise.resolve(fallback)
+    if (prompt.callbacks.size >= CALLBACK_LIMIT) return Promise.reject(new Error('Qwen prompt callback limit reached'))
+    const task = Promise.resolve().then(operation); prompt.callbacks.add(task)
+    task.finally(() => prompt.callbacks.delete(task)).catch(() => {})
+    return task
+  }
+  async function drainCallbacks(prompt) {
+    prompt.accepting = false
+    const results = await timeout(Promise.allSettled([...prompt.callbacks]), 'Qwen prompt callback drain', 5_000)
+    const failures = results.filter(result => result.status === 'rejected')
+    if (failures.length === 1) throw failures[0].reason
+    if (failures.length > 1) throw new AggregateError(failures.map(result => result.reason), 'Qwen prompt callbacks failed')
+  }
 
   async function launch(handleId, signal) {
     assertActive(undefined, signal)
@@ -102,12 +117,14 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
     try {
       record.client = new ClientSideConnection(() => ({
         requestPermission: async params => {
-          record.permissions += 1; if (record.prompt === undefined) throw new Error('Qwen permission request has no active prompt')
-          return onPermission({ handleId, promptId: record.prompt.id, params, signal: record.prompt.signal })
+          record.permissions += 1; const prompt = record.prompt
+          if (prompt === undefined) return { outcome: { outcome: 'cancelled' } }
+          return callback(prompt, () => onPermission({ handleId, promptId: prompt.id, params, signal: prompt.signal }), { outcome: { outcome: 'cancelled' } })
         },
         sessionUpdate: async params => {
           record.updates += 1; updateParams(params)
-          if (record.prompt !== undefined) await onUpdate({ handleId, promptId: record.prompt.id, params })
+          const prompt = record.prompt
+          if (prompt !== undefined) await callback(prompt, () => onUpdate({ handleId, promptId: prompt.id, params }))
           else if (record.phase !== 'loading' && TURN_UPDATE_TYPES.has(params.update.sessionUpdate)) throw new Error('Qwen emitted a turn update without an active prompt')
         },
         readTextFile: async () => { throw new Error('Qwen client filesystem read capability is disabled') },
@@ -176,18 +193,23 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
     assertActive(record, context.signal)
     if (record.nativeSessionId === undefined || record.prompt !== undefined) throw new Error('Qwen handle is not ready for a prompt')
     const promptId = id(context.promptId, 'promptId'); const done = Promise.withResolvers()
-    const prompt = { id: promptId, signal: context.signal, done }; record.prompt = prompt
+    const prompt = { id: promptId, signal: context.signal, done, accepting: true, callbacks: new Set() }; record.prompt = prompt
     try { await relay.admit('prompt', context.signal); assertActive(record, context.signal); if (record.prompt !== prompt) throw new Error('Qwen prompt reservation was revoked') }
     catch (error) { if (record.prompt === prompt) record.prompt = undefined; throw error }
     const abort = () => { void record.client.cancel({ sessionId: record.nativeSessionId }).catch(() => {}) }
     context.signal.addEventListener('abort', abort, { once: true }); record.phase = 'prompt'
     try {
       const operation = record.client.prompt({ sessionId: record.nativeSessionId, prompt: promptBlocks(input.prompt) })
-      try { return { nativeSessionId: record.nativeSessionId, result: await abortable(timeout(operation, 'Qwen prompt'), context.signal) } }
+      try {
+        const result = await abortable(timeout(operation, 'Qwen prompt'), context.signal)
+        await drainCallbacks(prompt)
+        return { nativeSessionId: record.nativeSessionId, result }
+      }
       catch (error) {
         await record.client.cancel({ sessionId: record.nativeSessionId }).catch(() => {})
         try { await timeout(operation.catch(() => {}), 'Qwen cancelled prompt settlement', 5_000) }
         catch { await dispose({ handleId }) }
+        try { await drainCallbacks(prompt) } catch (callbackError) { setImmediate(() => void dispose({ handleId }).catch(() => {})); throw new AggregateError([error, callbackError], 'Qwen prompt and callback drain failed') }
         throw error
       }
     } finally { context.signal.removeEventListener('abort', abort); if (record.prompt === prompt) record.prompt = undefined; done.resolve(); if (handles.get(record.handleId) === record && record.disposing === undefined) record.phase = 'ready' }
@@ -215,6 +237,10 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
       try {
         record.phase = 'disposing'
         record.guardian.stdin.end()
+        if (record.prompt !== undefined) {
+          record.prompt.accepting = false
+          await timeout(record.prompt.done.promise, 'Qwen active prompt disposal drain', 5_000).catch(() => {})
+        }
         let guardianResult = await Promise.race([record.guardianExited, new Promise(resolve => setTimeout(() => resolve(undefined), 3_000))])
         if (guardianResult === undefined && Number.isSafeInteger(record.qwenPid)) { try { process.kill(-record.qwenPid, 'SIGKILL') } catch {} }
         if (guardianResult === undefined) { record.guardian.kill('SIGKILL'); guardianResult = await timeout(record.guardianExited, 'Qwen guardian reap', 2_000) }

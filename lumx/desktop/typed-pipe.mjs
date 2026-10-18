@@ -9,7 +9,7 @@ const CHANNELS = new Set(['acp', 'control', 'engine'])
 const DIRECTIONS = new Set(['host-to-supervisor', 'supervisor-to-host'])
 const TYPES = Object.freeze({
   'host-to-supervisor': Object.freeze({ acp: new Set(['bytes', 'eof']), control: new Set(['ready', 'response']), engine: new Set(['cancel', 'dispose', 'request', 'response']) }),
-  'supervisor-to-host': Object.freeze({ acp: new Set(['bytes', 'eof']), control: new Set(['command']), engine: new Set(['event', 'request', 'response']) }),
+  'supervisor-to-host': Object.freeze({ acp: new Set(['bytes', 'eof']), control: new Set(['command']), engine: new Set(['cancel', 'dispose', 'event', 'request', 'response']) }),
 })
 
 function exactObject(value, allowed) {
@@ -19,12 +19,14 @@ function exactObject(value, allowed) {
 
 function validateFrame(value, expectedDirection, generation, expectedSeq) {
   const fields = new Set(['v', 'direction', 'channel', 'generation', 'seq', 'type', 'requestId', 'handleId', 'promptId', 'payload'])
-  if (!exactObject(value, fields) || value.v !== VERSION || value.direction !== expectedDirection
-    || value.generation !== generation || value.seq !== expectedSeq
-    || !Number.isSafeInteger(value.seq) || value.seq < 1 || !CHANNELS.has(value.channel)
-    || typeof value.type !== 'string' || !TYPES[expectedDirection]?.[value.channel]?.has(value.type)) {
-    throw new Error('LUMX typed pipe frame contract rejected')
-  }
+  const reject = reason => { throw new Error(`LUMX typed pipe frame contract rejected: ${reason}`) }
+  if (!exactObject(value, fields)) reject('shape')
+  if (value.v !== VERSION) reject('version')
+  if (value.direction !== expectedDirection) reject('direction')
+  if (value.generation !== generation) reject('generation')
+  if (!Number.isSafeInteger(value.seq) || value.seq < 1 || value.seq !== expectedSeq) reject('sequence')
+  if (!CHANNELS.has(value.channel)) reject('channel')
+  if (typeof value.type !== 'string' || !TYPES[expectedDirection]?.[value.channel]?.has(value.type)) reject(`type ${expectedDirection}/${String(value.channel)}/${String(value.type)}`)
   for (const key of ['requestId', 'handleId', 'promptId']) {
     if (value[key] !== undefined && (typeof value[key] !== 'string' || value[key].length === 0 || value[key].length > 128)) {
       throw new Error(`LUMX typed pipe ${key} is invalid`)

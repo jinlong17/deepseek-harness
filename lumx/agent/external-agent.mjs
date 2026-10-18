@@ -1,5 +1,6 @@
 import { agentEvents } from '../../packages/core/agent/lib/index.js'
 import { createScope } from '../../packages/core/scope/lib/index.js'
+import { ToolCallRecovery } from '../../packages/core/session/lib/index.js'
 import { AssistantStreamAccumulator, BlockAssembler, LlmAttemptId, ToolCallId, createAssistantMessage, createToolResultMessage } from '../../packages/llm/llm/lib/index.js'
 
 import { ExternalInbox } from './external-inbox.mjs'
@@ -71,6 +72,9 @@ export class ExternalQwenAgent {
   #frameRevision = 0
   #maintenance
   #running
+  #retiredPromptOrder = []
+  #retiredPrompts = new Set()
+  #rootCtx
   #controls = new Set()
   #controlFailure
   #toolCalls = new Map()
@@ -78,7 +82,7 @@ export class ExternalQwenAgent {
   constructor({ ctx, engine, flush, handleId, id, model, nativeSessionId, options, parentAgent, provider, session }) {
     this.id = id; this.options = Object.freeze({ ...options, provider, model }); this.session = session
     this.engine = engine; this.flush = flush; this.handleId = handleId; this.nativeSessionId = nativeSessionId; this.model = model; this.provider = provider
-    this.scope = createScope(ctx, this, parentAgent === undefined ? undefined : { parent: parentAgent }); this.ctx = this.scope.ctx
+    this.#rootCtx = ctx; this.scope = createScope(ctx, this, parentAgent === undefined ? undefined : { parent: parentAgent }); this.ctx = this.scope.ctx
     this.dispatch = agentEvents(ctx, this); this.inbox = new ExternalInbox(session, this.dispatch)
     this.lastTurn = Math.max(0, ...session.snapshotEvents().filter(event => event.type === 'turn/start').map(event => event.data.turn))
   }
@@ -116,8 +120,11 @@ export class ExternalQwenAgent {
     return (this.#maintenance = Promise.resolve().then(() => job(abort.signal)).finally(() => { this.#abort = undefined; this.#maintenance = undefined; if (this.inbox.hasPending) this.#wake() }))
   }
   onUpdate(promptId, params) {
-    if (this.#running?.promptId !== promptId) throw new Error('external Qwen update does not match the active prompt')
     if (params.sessionId !== this.nativeSessionId) throw new Error('external Qwen update has the wrong native session identity')
+    if (this.#running?.promptId !== promptId) {
+      if (this.#retiredPrompts.has(promptId)) return
+      throw new Error('external Qwen update does not match the active prompt')
+    }
     this.#running.attempt.update(params); this.#toolUpdate(params.update)
   }
   async requestPermission(promptId, params) {
@@ -151,7 +158,11 @@ export class ExternalQwenAgent {
     const running = { done: undefined, promptId: undefined, attempt: undefined }; this.#running = running
     const operation = this.#drive(running)
     this.dispatch.emit('agent/status', { status: 'running' })
-    running.done = operation.finally(() => { if (this.#running === running) this.#running = undefined; this.#abort = undefined; this.dispatch.emit('agent/status', { status: 'idle' }); if (this.inbox.hasPending) this.#wake() })
+    running.done = operation.finally(() => {
+      if (running.promptId !== undefined) this.#retirePrompt(running.promptId)
+      if (this.#running === running) this.#running = undefined
+      this.#abort = undefined; this.dispatch.emit('agent/status', { status: 'idle' }); if (this.inbox.hasPending) this.#wake()
+    })
     void running.done.catch(() => {})
   }
   async #drive(running) {
@@ -159,16 +170,26 @@ export class ExternalQwenAgent {
     this.session.append('turn/start', { turn }); const messages = this.inbox.claim(turn)
     if (messages.length === 0) { this.session.append('turn/end', { turn, reason: { kind: 'completed' } }); return }
     this.session.append('step/start', { turn, step }); for (const message of messages) this.session.append('user/message', message, { surfaceOp: 'append' })
+    const recovery = new ToolCallRecovery(); const stopRecovery = this.#rootCtx.on('session/event', (session, event) => { if (session === this.session) recovery.observe(event) })
     const promptId = `${this.id}:${turn}:${step}`; const attempt = new ExternalAttempt(this, turn, step, ++this.#attempt)
     running.promptId = promptId; running.attempt = attempt
+    let promptError
     try {
       await this.engine.prompt({ prompt: textContent(messages) }, { handleId: this.handleId, promptId, signal: abort.signal })
-      abort.signal.throwIfAborted(); attempt.finish(); this.session.append('step/end', { turn, step }); this.session.append('turn/end', { turn, reason: { kind: 'completed' } })
+      abort.signal.throwIfAborted(); attempt.finish()
     } catch (error) {
-      attempt.abandon(abort.signal.aborted); this.session.append('step/end', { turn, step })
-      const reason = abort.signal.aborted ? { kind: 'aborted', reason: abort.signal.reason } : { kind: 'error', error: failure(error) }
+      promptError = error; attempt.abandon(abort.signal.aborted)
+    }
+    try {
+      for (const event of recovery.results()) this.session.append('tool/result', event.data, { surfaceOp: 'append',
+        ...event.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: event.sourceEventSeqs } })
+    } finally { stopRecovery() }
+    this.session.append('step/end', { turn, step })
+    if (promptError === undefined) this.session.append('turn/end', { turn, reason: { kind: 'completed' } })
+    else {
+      const reason = abort.signal.aborted ? { kind: 'aborted', reason: abort.signal.reason } : { kind: 'error', error: failure(promptError) }
       this.session.append('turn/end', { turn, reason })
-      if (!abort.signal.aborted) { this.dispatch.emit('agent/error', { turn, step, error }); throw error }
+      if (!abort.signal.aborted) { this.dispatch.emit('agent/error', { turn, step, error: promptError }); throw promptError }
     }
   }
   #toolUpdate(update) {
@@ -186,5 +207,10 @@ export class ExternalQwenAgent {
       this.session.append('tool/result', { turn: this.lastTurn, step: 1,
         message: createToolResultMessage({ callId, content, isError: update.status === 'failed' }) }, { surfaceOp: 'append' })
     }
+  }
+  #retirePrompt(promptId) {
+    if (this.#retiredPrompts.has(promptId)) return
+    this.#retiredPrompts.add(promptId); this.#retiredPromptOrder.push(promptId)
+    if (this.#retiredPromptOrder.length > 64) this.#retiredPrompts.delete(this.#retiredPromptOrder.shift())
   }
 }

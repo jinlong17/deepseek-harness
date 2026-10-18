@@ -171,7 +171,30 @@ test('a late permission approval after turn cancellation cannot authorize work',
   handle.agent.cancel({ kind: 'caller' }); release.resolve('allowed-once')
   await handle.agent.whenIdle()
   assert.deepEqual(permission, { outcome: { outcome: 'cancelled' } })
+  const before = handle.agent.session.snapshotEvents().length
+  assert.doesNotThrow(() => engine.router.onUpdate({ handleId: handle.agent.handleId, promptId: 'late-permission:1:1', params: { sessionId: 'native-1',
+    update: { sessionUpdate: 'tool_call_update', toolCallId: 'tool-1', status: 'failed' } } }))
+  assert.equal(handle.agent.session.snapshotEvents().length, before)
+  assert.throws(() => engine.router.onUpdate({ handleId: handle.agent.handleId, promptId: 'unknown-prompt', params: { sessionId: 'native-1',
+    update: { sessionUpdate: 'tool_call_update', toolCallId: 'tool-1', status: 'failed' } } }), /active prompt/)
   await handle.dispose(); assert.equal(engine.calls.dispose, 1)
+})
+
+test('factory close propagates live native cleanup failure after draining ownership', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-close-failure-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const engine = fakeEngine(); engine.dispose = async () => { engine.calls.dispose += 1; throw new Error('synthetic native cleanup failure') }
+  const { ctx, owner } = await runtime(t, engine, root); await ctx.agents.create({ sessionId: 'close-failure' })
+  await assert.rejects(owner.close(), /synthetic native cleanup failure/)
+  assert.deepEqual(owner.stats(), { accepting: false, live: 0, pending: 0 }); assert.equal(engine.calls.dispose, 1)
+})
+
+test('disposing an Agent parks queued inbox work before the active turn settles', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-dispose-park-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const engine = fakeEngine(); const entered = Promise.withResolvers()
+  engine.prompt = async (_input, { signal }) => { engine.calls.prompt += 1; entered.resolve(); await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })) }
+  const { ctx } = await runtime(t, engine, root); const handle = await ctx.agents.create({ sessionId: 'dispose-park' })
+  handle.agent.followup(user()); await entered.promise; handle.agent.followup(user()); await handle.dispose()
+  assert.equal(engine.calls.prompt, 1); assert.equal(engine.calls.dispose, 1); assert.equal(ctx.agents.get('dispose-park'), undefined)
 })
 
 test('cancel quiescence waits for remote prompt drain while another Agent remains usable', async t => {
@@ -210,4 +233,24 @@ test('external native tools persist one advertised call/result lifecycle', async
   const handle = await ctx.agents.create({ sessionId: 'external-tool-session' }); handle.agent.followup(user()); await handle.agent.whenIdle(); await ctx.sessionPersistence.flush(); await handle.dispose()
   const stored = await ctx.sessionPersistence.open('external-tool-session', 'read'); const types = (await stored.read()).events.map(event => event.type); await stored.close()
   assert.deepEqual(types.filter(type => type === 'assistant/message' || type === 'tool/call' || type === 'tool/result'), ['assistant/message', 'tool/call', 'tool/result', 'assistant/message'])
+})
+
+test('a native tool without a terminal update persists an unknown-outcome result before step closure', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-tool-unknown-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const engine = fakeEngine(); const { ctx } = await runtime(t, engine, root)
+  engine.prompt = async (_input, { handleId, promptId }) => {
+    await engine.router.onUpdate({ handleId, promptId, params: { sessionId: 'native-1', update: { sessionUpdate: 'tool_call', toolCallId: 'tool-unknown', title: 'native-shell', rawInput: { command: 'true' }, status: 'in_progress' } } })
+    throw new Error('native engine died after tool start')
+  }
+  const handle = await ctx.agents.create({ sessionId: 'external-tool-unknown' }); handle.agent.followup(user())
+  await assert.rejects(handle.agent.whenIdle(), /native engine died/); await ctx.sessionPersistence.flush(); await handle.dispose().catch(() => {})
+  assert.deepEqual(handle.agent.session.snapshotEvents().map(event => [event.type, event.type === 'tool/result' ? event.data.error?.code : undefined]), [
+    ['agent/external-engine-bound', undefined], ['agent/inbox/spliced', undefined], ['turn/start', undefined], ['agent/inbox/spliced', undefined],
+    ['step/start', undefined], ['user/message', undefined], ['assistant/message', undefined], ['tool/call', undefined], ['assistant/attempt', undefined],
+    ['tool/result', 'TOOL_OUTCOME_UNKNOWN'], ['step/end', undefined], ['turn/end', undefined],
+  ])
+  const stored = await ctx.sessionPersistence.open('external-tool-unknown', 'read'); const events = (await stored.read()).events; await stored.close()
+  const result = events.find(event => event.type === 'tool/result')
+  assert.equal(result?.data.error?.code, 'TOOL_OUTCOME_UNKNOWN'); assert.equal(result?.surfaceOp, 'append')
+  assert.ok(events.findIndex(event => event.type === 'tool/result') < events.findIndex(event => event.type === 'step/end'))
 })

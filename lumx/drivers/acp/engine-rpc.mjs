@@ -39,8 +39,22 @@ function timeout(promise, ms, label) {
 /** Correlated, bounded engine RPC over one validated typed pipe. */
 export function createEngineRpcPeer({ pipe, handlers = {}, onEvent = () => {} }) {
   const outgoing = new Map(); const abandoned = new Map(); const incoming = new Map(); const completed = new Set()
-  const controls = new Set()
-  let accepting = true; let incomingTotal = 0; let eventCount = 0; let eventTail = Promise.resolve()
+  const controls = new Set(); const eventTails = new Map()
+  const lifecycleAbort = new AbortController()
+  let accepting = true; let incomingTotal = 0; let eventCount = 0; let closing
+
+  const workKey = (handleId, promptId) => `${handleId ?? ''}\u0000${promptId ?? ''}`
+  function localWork(handleId, promptId, operation) {
+    const work = []
+    for (const [key, task] of eventTails) {
+      const separator = key.indexOf('\u0000'); const eventHandle = key.slice(0, separator); const eventPrompt = key.slice(separator + 1)
+      if (eventHandle === (handleId ?? '') && (operation === 'dispose' || eventPrompt === (promptId ?? ''))) work.push(task)
+    }
+    for (const active of incoming.values()) {
+      if (active.handleId === handleId && (operation === 'dispose' || active.promptId === promptId)) work.push(active.done)
+    }
+    return work
+  }
 
   function request(operation, input, options = {}) {
     if (!accepting) return Promise.reject(new Error('engine RPC peer is closed'))
@@ -72,7 +86,7 @@ export function createEngineRpcPeer({ pipe, handlers = {}, onEvent = () => {} })
     if (pending === undefined) return
     outgoing.delete(requestId); clearTimeout(pending.timer)
     pending.signal?.removeEventListener('abort', pending.abort)
-    if (retain) abandoned.set(requestId, Object.freeze({ handleId: pending.handleId, operation: pending.operation, promptId: pending.promptId }))
+    if (retain) abandoned.set(requestId, { handleId: pending.handleId, operation: pending.operation, promptId: pending.promptId })
     if (error === undefined) pending.result.resolve(value)
     else pending.result.reject(error)
   }
@@ -84,16 +98,22 @@ export function createEngineRpcPeer({ pipe, handlers = {}, onEvent = () => {} })
       const payload = responsePayload(frame.payload); const pending = outgoing.get(frame.requestId) ?? abandoned.get(frame.requestId)
       if (pending === undefined) throw new Error('engine response has no pending request')
       if (!same(frame.handleId, pending.handleId) || !same(frame.promptId, pending.promptId) || payload.operation !== pending.operation) throw new Error('engine response correlation mismatch')
-      if (abandoned.delete(frame.requestId)) return true
-      if (payload.ok) settleOutgoing(frame.requestId, undefined, payload.value)
-      else settleOutgoing(frame.requestId, new Error(payload.error))
+      if (pending.responseReceived) throw new Error('engine response was already received')
+      pending.responseReceived = true
+      const local = ['prompt', 'cancel', 'dispose'].includes(pending.operation) ? localWork(pending.handleId, pending.promptId, pending.operation) : []
+      void timeout(Promise.all(local), CLOSE_TIMEOUT_MS, 'engine RPC correlated local drain').then(() => {
+        if (abandoned.delete(frame.requestId)) return
+        if (payload.ok) settleOutgoing(frame.requestId, undefined, payload.value)
+        else settleOutgoing(frame.requestId, new Error(payload.error))
+      }, error => { if (accepting) void close(error) })
       return true
     }
     if (frame.type === 'event') {
       if (eventCount >= MAX_EVENTS) throw new Error('engine RPC event queue limit reached')
-      eventCount += 1
-      eventTail = eventTail.then(() => onEvent(frame)).finally(() => { eventCount -= 1 })
-      eventTail.catch(error => { void close(error) })
+      eventCount += 1; const key = workKey(frame.handleId, frame.promptId); const previous = eventTails.get(key) ?? Promise.resolve()
+      const task = previous.then(() => onEvent(frame, { signal: lifecycleAbort.signal }))
+        .finally(() => { eventCount -= 1; if (eventTails.get(key) === task) eventTails.delete(key) })
+      eventTails.set(key, task); task.catch(error => { if (accepting) void close(error) })
       return true
     }
     if (frame.type === 'cancel') {
@@ -112,7 +132,7 @@ export function createEngineRpcPeer({ pipe, handlers = {}, onEvent = () => {} })
     if (incomingTotal >= MAX_COMPLETED || incoming.size >= MAX_PENDING || incoming.has(frame.requestId) || completed.has(frame.requestId)) throw new Error('engine RPC incoming request rejected')
     const payload = requestPayload(frame.payload); const handler = handlers[payload.operation]
     if (typeof handler !== 'function') throw new Error(`engine RPC operation is unavailable: ${payload.operation}`)
-    const controller = new AbortController(); const active = { controller, handleId: frame.handleId, promptId: frame.promptId }
+    const controller = new AbortController(); const active = { controller, handleId: frame.handleId, promptId: frame.promptId, operation: payload.operation }
     const done = Promise.resolve().then(() => handler(payload.input, { signal: controller.signal, requestId: frame.requestId, handleId: frame.handleId, promptId: frame.promptId }))
       .then(value => sendResponse(frame, { operation: payload.operation, ok: true, value }), error => sendResponse(frame, { operation: payload.operation, ok: false, error: error instanceof Error ? error.message : String(error) }))
       .catch(error => { if (accepting) void close(error) })
@@ -135,15 +155,18 @@ export function createEngineRpcPeer({ pipe, handlers = {}, onEvent = () => {} })
   function dispose(handleId) { return pipe.send({ channel: 'engine', type: 'dispose', handleId: identifier(handleId, 'handleId') }, { priority: true }) }
   function event(type, payload, ids = {}) { return pipe.send({ channel: 'engine', type: 'event', payload: { type: identifier(type, 'event type'), value: payload }, ...ids }, { priority: type === 'permission' }) }
 
-  async function close(reason = new Error('engine RPC peer closed')) {
-    if (!accepting) return
-    accepting = false
-    for (const pending of [...outgoing.keys()]) settleOutgoing(pending, reason)
-    const drains = [...incoming.values()].map(active => { active.controller.abort(reason); return active.done })
-    await Promise.allSettled([timeout(Promise.allSettled(drains), CLOSE_TIMEOUT_MS, 'engine RPC handler drain'),
-      timeout(Promise.allSettled([...controls]), CLOSE_TIMEOUT_MS, 'engine RPC control drain'), timeout(eventTail, CLOSE_TIMEOUT_MS, 'engine RPC event drain')])
-    incoming.clear(); controls.clear(); eventCount = 0
-    abandoned.clear()
+  function close(reason = new Error('engine RPC peer closed')) {
+    return (closing ??= (async () => {
+      accepting = false; lifecycleAbort.abort(reason)
+      for (const pending of [...outgoing.keys()]) settleOutgoing(pending, reason)
+      const drains = [...incoming.values()].map(active => { active.controller.abort(reason); return active.done })
+      const results = await Promise.allSettled([timeout(Promise.allSettled(drains), CLOSE_TIMEOUT_MS, 'engine RPC handler drain'),
+        timeout(Promise.allSettled([...controls]), CLOSE_TIMEOUT_MS, 'engine RPC control drain'),
+        timeout(Promise.allSettled([...eventTails.values()]), CLOSE_TIMEOUT_MS, 'engine RPC event drain')])
+      const failures = results.filter(result => result.status === 'rejected')
+      if (failures.length > 0) throw new AggregateError(failures.map(result => result.reason), 'engine RPC peer failed to drain')
+      incoming.clear(); controls.clear(); eventTails.clear(); abandoned.clear()
+    })())
   }
 
   return Object.freeze({ cancel, close, dispose, event, onFrame, request,

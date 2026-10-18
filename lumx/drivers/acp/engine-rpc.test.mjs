@@ -9,8 +9,8 @@ function peers(handlers) {
   const hostRouter = { onFrame() {} }; const supervisorRouter = { onFrame() {} }
   const hostPipe = createTypedPipe({ readable: s2h, writable: h2s, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor', generation: 'engine-generation', onFrame: frame => hostRouter.onFrame(frame) })
   const supervisorPipe = createTypedPipe({ readable: h2s, writable: s2h, incomingDirection: 'host-to-supervisor', outgoingDirection: 'supervisor-to-host', generation: 'engine-generation', onFrame: frame => supervisorRouter.onFrame(frame) })
-  const host = createEngineRpcPeer({ pipe: hostPipe, handlers: handlers.host })
-  const supervisor = createEngineRpcPeer({ pipe: supervisorPipe, handlers: handlers.supervisor })
+  const host = createEngineRpcPeer({ pipe: hostPipe, handlers: handlers.host, onEvent: handlers.hostEvent })
+  const supervisor = createEngineRpcPeer({ pipe: supervisorPipe, handlers: handlers.supervisor, onEvent: handlers.supervisorEvent })
   hostRouter.onFrame = host.onFrame; supervisorRouter.onFrame = supervisor.onFrame
   return { host, supervisor, close: async () => { await Promise.allSettled([host.close(), supervisor.close(), hostPipe.close(), supervisorPipe.close()]) } }
 }
@@ -70,6 +70,31 @@ test('correlated cancel and dispose requests acknowledge remote settlement', asy
   let disposed = false; const disposing = p.host.request('dispose', {}, { handleId: 'handle-1' }).then(() => { disposed = true })
   await disposeEntered.promise; await new Promise(resolve => setImmediate(resolve)); assert.equal(disposed, false)
   disposeRelease.resolve(); await disposing
+})
+
+test('correlated completion waits for local update and permission drains without blocking another handle', async t => {
+  const updateEntered = deferred(); const updateRelease = deferred(); const permissionEntered = deferred(); const permissionRelease = deferred()
+  let supervisor
+  const p = peers({
+    host: { permission: async () => { permissionEntered.resolve(); await permissionRelease.promise; return { outcome: 'cancelled' } } },
+    hostEvent: async frame => { if (frame.handleId === 'handle-1') { updateEntered.resolve(); await updateRelease.promise } },
+    supervisor: {
+      prompt: async (_input, ids) => {
+        if (ids.handleId === 'handle-2') return { stopReason: 'end_turn' }
+        await supervisor.event('update', { part: 1 }, { handleId: ids.handleId, promptId: ids.promptId })
+        void supervisor.request('permission', { tool: 'held' }, { handleId: ids.handleId, promptId: ids.promptId })
+        return { stopReason: 'end_turn' }
+      },
+      cancel: async () => {},
+    },
+  })
+  supervisor = p.supervisor; t.after(p.close)
+  let promptSettled = false
+  const prompt = p.host.request('prompt', {}, { handleId: 'handle-1', promptId: 'prompt-1' }).finally(() => { promptSettled = true })
+  await updateEntered.promise; await permissionEntered.promise; await new Promise(resolve => setImmediate(resolve)); assert.equal(promptSettled, false)
+  assert.deepEqual(await p.host.request('prompt', {}, { handleId: 'handle-2', promptId: 'prompt-2' }), { stopReason: 'end_turn' })
+  updateRelease.resolve(); await new Promise(resolve => setImmediate(resolve)); assert.equal(promptSettled, false)
+  permissionRelease.resolve(); assert.deepEqual(await prompt, { stopReason: 'end_turn' })
 })
 
 test('rejects unknown responses and bounds operation names', async t => {
@@ -135,14 +160,15 @@ test('aborting create consumes its late completion and leaves another handle usa
   assert.deepEqual(await p.host.request('create', {}, { handleId: 'handle-next' }), { nativeSessionId: 'native-2' })
 })
 
-test('close is bounded for a handler that ignores abort and rejects late frames', async () => {
+test('close reports a bounded drain failure and repeated close joins the same lifecycle', async () => {
   const pipe = fakePipe(); const never = new Promise(() => {})
   const peer = createEngineRpcPeer({ pipe, handlers: { create: () => never } })
   peer.onFrame({ channel: 'engine', type: 'request', requestId: 'blocked-1', handleId: 'handle-1', payload: { operation: 'create', input: {} } })
   await until(() => peer.stats().incoming === 1)
-  const before = Date.now(); await peer.close(); const elapsed = Date.now() - before
+  const before = Date.now(); const first = peer.close(); const second = peer.close(); assert.equal(first, second)
+  await assert.rejects(first, /failed to drain/); const elapsed = Date.now() - before
   assert.ok(elapsed >= 900 && elapsed < 1_500, `unexpected close duration: ${elapsed}`)
-  assert.equal(peer.stats().incoming, 0)
+  assert.equal(peer.stats().incoming, 1)
   assert.throws(() => peer.onFrame({ channel: 'engine', type: 'event', payload: { type: 'late', value: {} } }), /after close/)
 })
 

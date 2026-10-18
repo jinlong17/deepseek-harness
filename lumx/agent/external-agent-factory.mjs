@@ -31,7 +31,7 @@ export function createExternalEngineRouter() {
 /** Durable external-engine Agent factory; it never imports or wraps AgentLoop. */
 export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engineId, model, provider, router }) {
   if (![artifactIdentity, engineId, model, provider].every(value => typeof value === 'string' && value.length > 0)) throw new Error('external Agent factory identity is incomplete')
-  const live = new Set(); const pending = new Set(); const factoryAbort = new AbortController(); let accepting = true; let closing
+  const live = new Set(); const pending = new Set(); const factoryAbort = new AbortController(); const factoryDisposal = new Error('external Agent factory disposed'); let accepting = true; let closing
 
   async function transact(ownerCtx, options, mode) {
     if (!accepting) throw new Error('external Agent factory is disposed')
@@ -79,8 +79,6 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engin
       let disposeCore
       const dispose = () => (disposeCore ??= (async () => {
         const failures = []
-        agent.cancel({ kind: 'disposed' }, { keepInbox: true })
-        try { await agent.whenIdle() } catch (error) { failures.push(error) }
         try { await agent.dispose() } catch (error) { failures.push(error) }
         detachRoute?.(); detachAgent?.(); detachSession?.()
         try { await storage.close() } catch (error) { failures.push(error) }
@@ -111,7 +109,14 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engin
   })
   const release = ctx.agents.setFactory(factory)
   async function close() {
-    return (closing ??= (async () => { accepting = false; factoryAbort.abort(new Error('external Agent factory disposed')); await Promise.resolve(release()); await Promise.allSettled([...pending]); await Promise.allSettled([...live].map(dispose => dispose())) })())
+    return (closing ??= (async () => {
+      accepting = false; factoryAbort.abort(factoryDisposal); await Promise.resolve(release())
+      const pendingResults = await Promise.allSettled([...pending]); const liveResults = await Promise.allSettled([...live].map(dispose => dispose()))
+      const failures = liveResults.filter(result => result.status === 'rejected').map(result => result.reason)
+      for (const result of pendingResults) if (result.status === 'rejected' && result.reason !== factoryDisposal) failures.push(result.reason)
+      if (failures.length === 1) throw failures[0]
+      if (failures.length > 1) throw new AggregateError(failures, 'external Agent factory shutdown failed')
+    })())
   }
   return Object.freeze({ close, factory, stats: () => Object.freeze({ accepting, live: live.size, pending: pending.size }) })
 }
