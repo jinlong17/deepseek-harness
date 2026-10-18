@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 
-import { authenticate, baseLaunch, check, freePort, loadConfig, pending, rawRequest, unit, writeResult } from './b5-hook-common.mjs'
+import { authenticate, baseLaunch, check, freePort, loadConfig, rawRequest, unit, writeResult } from './b5-hook-common.mjs'
 import { desktopStub } from './b5-fixed-stubs.mjs'
 
 const config = loadConfig(); let model; let identity; let gatewayState = { active: true }
@@ -58,9 +58,13 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
     const positiveChecks = [check('byok-positive-model-response', byName.positive.modelRequests === 1 && passed(byName.positive.response), byName.positive),
       ...[['anonymous','byok-anonymous-zero-model'],['wrongType','byok-wrong-type-zero-model'],['invalidExpiry','byok-invalid-expiry-zero-model'],['equalExpiry','byok-equal-expiry-zero-model'],['subjectMismatch','byok-subject-mismatch-zero-model'],['expired','byok-expired-zero-model'],['revoked','byok-revoked-zero-model']].map(([name,id]) => check(id, zero(name), byName[name]))]
     const privacyFacts = privacy.facts; const allRows = privacyFacts.final.every(row => row.resolved && row.disabled === true && !row.fiberPresent)
+    const shutdown = await host.shutdown(); const closingRows = shutdown.control?.qualificationShutdown?.privacy ?? []
+    const shutdownRowsClosed = closingRows.length === 7 && closingRows.every(row => row.before.resolved && row.before.disabled === true
+      && row.sameEntryAfterShutdown && row.postInventoryPresent && row.postDisabled === true && (!row.postFiberPresent || row.postFiberState === 4))
     const cordisChecks = [check('privacy-seven-resolved-disabled-no-fiber', allRows, privacyFacts.final), check('privacy-safe-update-remove-reinstall', privacyFacts.actions.every(row => row.executed && row.absentAfterRemove && row.reinstallDisabled), privacyFacts.actions),
       check('privacy-late-reenable-rejected', privacyFacts.lateEnable.rejected === true, privacyFacts.lateEnable), check('privacy-renamed-absent-uncomposed-inventory', privacyFacts.candidates.every(row => privacyFacts.privacyIds.includes(row.id)), privacyFacts.candidates),
-      pending('privacy-shutdown-no-fiber', 'Python retained-material lifecycle adapter after Host cleanup'), check('consumer-profile-privacy-consumer', host.consumer === 'desktop-byok', { consumer: host.consumer }), check('governed-desktop-h1-adapter-capability', privacyFacts.governedCandidates.length > 0, privacyFacts.governedCandidates)]
-    writeResult(config, { runtimeAnchorSha256, qualification, observations: { cases, http: { missingOrigin, wrongHost, wrongOrigin }, isolation, privacy }, counted_results: [unit('real/Cordis-shutdown', cordisChecks, 'actual Host privacy lifecycle'), unit('real/developer-Host-token-boundary', tokenChecks, 'actual Host boundary'), unit('real/developer-Host-positive', positiveChecks, 'actual main BYOK adapter; alternate controls are separate retained Hosts')] })
+      check('privacy-shutdown-no-fiber', shutdownRowsClosed, closingRows), check('consumer-profile-privacy-consumer', host.consumer === 'desktop-byok', { consumer: host.consumer }), check('governed-desktop-h1-adapter-capability', privacyFacts.governedCandidates.length > 0, privacyFacts.governedCandidates)]
+    writeResult(config, { runtimeAnchorSha256, qualification, parent_exports: { agentLoopPositive: { modelRequests: byName.positive.modelRequests,
+      response: byName.positive.response, sessionId: byName.positive.response.sessionId } }, observations: { cases, http: { missingOrigin, wrongHost, wrongOrigin }, isolation, privacy, shutdown }, counted_results: [unit('real/Cordis-shutdown', cordisChecks, 'actual Host privacy lifecycle including same-ctx post-runtime shutdown facts'), unit('real/developer-Host-token-boundary', tokenChecks, 'actual Host boundary'), unit('real/developer-Host-positive', positiveChecks, 'actual main BYOK adapter; alternate controls are separate retained Hosts')] })
   } finally { await model?.close() }
 }

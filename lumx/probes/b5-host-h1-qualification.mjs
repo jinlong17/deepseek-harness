@@ -44,7 +44,7 @@ export async function qualifyH1Runtime(runtime, input, runId) {
     const loader = [...runtime.ctx.loader.entries()]
     const nativeEntry = loader.find(row => row.options.id === 'tool-bash')
     return Object.freeze({
-      inventories, broker, gateway, retry, native,
+      bundles: runtime.bundles, inventories, broker, gateway, retry, native,
       nativeRow: nativeEntry === undefined ? { resolved: false } : { resolved: true, disabled: nativeEntry.disabled, fiberPresent: nativeEntry.fiber !== undefined, state: nativeEntry.fiber?.state ?? null },
       loaderIds: loader.map(row => row.options.id), governance: runtime.governance,
     })

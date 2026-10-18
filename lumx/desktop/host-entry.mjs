@@ -53,13 +53,15 @@ async function command(frame) {
   if (value?.command === 'health') return healthCheck()
   if (value?.command === 'inspect-session' && typeof value.sessionId === 'string' && /^[0-9a-f-]{36}$/u.test(value.sessionId)) { const result = await runtime.ctx.sessionController.inspect(value.sessionId, new AbortController().signal); return { eventCount: result.events.length, sessionId: value.sessionId } }
   if (value?.command === 'qualify' && runtime.qualification !== undefined) return runtime.qualification.execute(value.request)
-  if (value?.command === 'shutdown') { setImmediate(() => void shutdown().then(() => process.exit(0), () => process.exit(1))); return { stopping: true } }
+  if (value?.command === 'shutdown') return { stopping: true, ...await runtime.shutdown() }
   throw new Error('Host control command is invalid')
 }
 function onFrame(frame) {
   if (acp.accept(frame) || rpc.onFrame(frame)) return
   if (frame.channel !== 'control' || frame.type !== 'command') throw new Error('Host received an unsupported frame')
+  const stoppingCommand = frame.payload?.command === 'shutdown'
   void command(frame).then(value => pipe.send({ channel: 'control', type: 'response', requestId: frame.requestId, payload: { ok: true, value } }), error => pipe.send({ channel: 'control', type: 'response', requestId: frame.requestId, payload: { ok: false, error: error instanceof Error ? error.message : String(error) } }))
+    .finally(() => { if (stoppingCommand) setImmediate(() => void shutdown().then(() => process.exit(0), () => process.exit(1))) })
 }
 const shutdown = () => (stopping ??= (async () => { await runtime?.shutdown(); await rpc.close(); await pipe.close().catch(() => {}) })())
 pipe.closed.then(() => shutdown().then(() => process.exit(0), () => process.exit(1)), () => shutdown().then(() => process.exit(1), () => process.exit(1)))

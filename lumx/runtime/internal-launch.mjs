@@ -107,15 +107,17 @@ export async function launchLumxRuntimeInProcess(input) {
     const readyUrl = running.ctx.connection.authenticatedUrl(baseUrl)
     const surface = consumer === 'platform-stub' ? 'local-platform-stub' : consumer === 'external-qwen'
       ? 'official-dsh-web-acp-shared-host' : 'official-dsh-web-profile-shared-host'
-    const qualification = installGate1HostQualification({ consumer, ctx: running.ctx, governance, surface }, input)
+    const qualification = installGate1HostQualification({ bundles: profile.bundles, consumer, ctx: running.ctx, governance, surface }, input)
     let stopped
     const shutdown = () => stopped ??= (async () => {
-      const failures = []
-      for (const close of [() => qualification?.close(), () => external?.close(), () => running.shutdown.shutdown(0)]) {
-        try { await close() } catch (error) { failures.push(error) }
+      const failures = []; let qualificationShutdown
+      for (const [name, close] of [['qualification', () => qualification?.close()], ['external', () => external?.close()],
+        ['runtime', () => running.shutdown.shutdown(0)], ['post-runtime', () => qualification?.closeAfterRuntime()]]) {
+        try { const value = await close(); if (name === 'post-runtime') qualificationShutdown = value } catch (error) { failures.push(error) }
       }
       cleanup()
       if (failures.length) throw new AggregateError(failures, 'LUMX runtime shutdown failed')
+      return qualificationShutdown === undefined ? {} : { qualificationShutdown }
     })()
     return Object.freeze({
       baseUrl,

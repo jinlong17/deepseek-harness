@@ -2,7 +2,7 @@ import { connect } from 'node:net'
 
 import { qualifyAlternateByok } from './b5-host-byok-qualification.mjs'
 import { qualifyH1Runtime } from './b5-host-h1-qualification.mjs'
-import { qualifyPrivacyLifecycle } from './b5-host-privacy-qualification.mjs'
+import { capturePrivacyShutdownRows, observePrivacyShutdownRows, qualifyPrivacyLifecycle } from './b5-host-privacy-qualification.mjs'
 
 const OPERATIONS = new Set(['isolation-network', 'privacy-lifecycle', 'h1-observe', 'byok-alternate'])
 function deadline(promise, milliseconds = 170_000) {
@@ -28,7 +28,7 @@ function deniedNetwork() {
 export function installGate1HostQualification(runtime, input) {
   const declaration = validateDeclaration(input.qualification)
   if (declaration === undefined) return undefined
-  let active; let closing = false
+  let active; let closing = false; let privacyObserved = false; let privacyShutdownRows
   const used = new Set()
   async function execute(request) {
     if (closing) throw new Error('Host qualification is closing')
@@ -40,7 +40,11 @@ export function installGate1HostQualification(runtime, input) {
     used.add(operation)
     const task = (async () => {
       if (operation === 'isolation-network') return deniedNetwork()
-      if (operation === 'privacy-lifecycle') return qualifyPrivacyLifecycle(runtime.ctx)
+      if (operation === 'privacy-lifecycle') {
+        const facts = await qualifyPrivacyLifecycle(runtime.ctx)
+        privacyObserved = true
+        return facts
+      }
       if (operation === 'byok-alternate') return qualifyAlternateByok(runtime, input)
       return qualifyH1Runtime(runtime, input, request.runId)
     })()
@@ -49,6 +53,13 @@ export function installGate1HostQualification(runtime, input) {
     const raw = JSON.stringify(facts); if (Buffer.byteLength(raw) > 512 * 1024) throw new Error('Host qualification facts exceed bound')
     return Object.freeze({ operation, pid: process.pid, consumer: runtime.consumer, surface: runtime.surface, facts })
   }
-  async function close() { closing = true; await active }
-  return Object.freeze({ declaration, execute, close })
+  async function close() { closing = true; await active; if (privacyObserved) privacyShutdownRows = capturePrivacyShutdownRows(runtime.ctx) }
+  function closeAfterRuntime() {
+    if (!closing) throw new Error('Host qualification closing snapshot requires a closed dispatcher')
+    if (privacyShutdownRows === undefined) return undefined
+    const privacy = observePrivacyShutdownRows(runtime.ctx, privacyShutdownRows)
+    const raw = JSON.stringify(privacy); if (Buffer.byteLength(raw) > 64 * 1024) throw new Error('Host closing facts exceed bound')
+    return Object.freeze({ privacy })
+  }
+  return Object.freeze({ declaration, execute, close, closeAfterRuntime })
 }

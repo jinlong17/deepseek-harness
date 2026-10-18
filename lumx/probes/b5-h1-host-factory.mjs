@@ -28,7 +28,7 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
     const inventories = Object.values(f.inventories); const privacyInert = privacy.facts.final.every(row => row.disabled === true && !row.fiberPresent)
     const canary = readFileSync(config.nativeCanaryPath, 'utf8')
     const checks = [
-      check('runProfile-composition', host.consumer === 'governed-h1' && f.loaderIds.length > 0, { consumer: host.consumer, loaderIds: f.loaderIds }),
+      check('runProfile-composition', host.consumer === 'governed-h1' && JSON.stringify(f.bundles) === JSON.stringify(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']), { consumer: host.consumer, bundles: f.bundles, loaderIds: f.loaderIds }),
       pending('preparation-failure-recovery', 'Python expected-failure controller followed by this retained Host'),
       check('privacy-rows-inert', privacyInert, privacy.facts.final), check('physical-network-denied', isolation.facts.denied === true, isolation),
       check('actual-agent-inventory', JSON.stringify(names(f.inventories.root)) === JSON.stringify(['lumx_broker']), f.inventories.root),

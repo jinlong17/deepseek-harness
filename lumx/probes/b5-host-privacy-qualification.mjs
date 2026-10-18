@@ -12,6 +12,27 @@ function snapshot(ctx) {
       : { id, resolved: true, disabled: entry.disabled, fiberPresent: entry.fiber !== undefined, fiberState: entry.fiber?.state ?? null, name: entry.options.name }
   })
 }
+export function capturePrivacyShutdownRows(ctx) {
+  const entries = [...ctx.loader.entries()]
+  return PRIVACY_IDS.map(id => {
+    const entry = entries.find(candidate => candidate.options.id === id)
+    const resolution = entry === undefined ? undefined : entry.loader.resolveEntry(entry.options.name, entry.parent.tree.ctx.baseUrl)
+    return entry === undefined ? { id, entry: undefined, before: { resolved: false } } : { id, entry,
+      before: { resolved: true, disabled: entry.disabled, fiberPresent: entry.fiber !== undefined, fiberState: entry.fiber?.state ?? null,
+        name: entry.options.name, identity: resolution } }
+  })
+}
+export function observePrivacyShutdownRows(ctx, captured) {
+  const current = [...ctx.loader.entries()]
+  return captured.map(row => {
+    const entry = current.find(candidate => candidate.options.id === row.id)
+    const selected = row.entry
+    return { id: row.id, before: row.before, sameEntryAfterShutdown: entry === selected,
+      postInventoryPresent: entry !== undefined, postDisabled: selected?.disabled ?? null,
+      postFiberPresent: selected?.fiber !== undefined, postFiberState: selected?.fiber?.state ?? null,
+      postName: selected?.options?.name ?? null }
+  })
+}
 /** Exercise the governed loader through the actual supported Host ctx. */
 export async function qualifyPrivacyLifecycle(ctx) {
   const initial = snapshot(ctx); const actions = []
