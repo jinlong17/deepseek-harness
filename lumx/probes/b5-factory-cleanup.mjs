@@ -34,3 +34,23 @@ export async function closeB5HostOwners({ host, retained, factory, primary }) {
   }
   aggregate(primary, failures)
 }
+
+export async function withB5FactoryCleanup(close, run) {
+  let value
+  let primary
+  try {
+    value = await run()
+  } catch (error) {
+    primary = error
+  }
+  try {
+    await close()
+  } catch (cleanup) {
+    if (primary !== undefined) {
+      throw new AggregateError([primary, cleanup], 'scenario failure plus factory cleanup failure')
+    }
+    throw cleanup
+  }
+  if (primary !== undefined) throw primary
+  return value
+}

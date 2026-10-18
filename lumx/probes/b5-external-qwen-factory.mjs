@@ -4,9 +4,10 @@ import { join } from 'node:path'
 
 import { baseLaunch, check, deferred, freePort, loadConfig, pending, unit, writeResult } from './b5-hook-common.mjs'
 import { qwenStub } from './b5-fixed-stubs.mjs'
+import { withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
 import { binding, browserResume, effectFacts, front, history, initialize, readEvents, runCreate, runPermission } from './b5-external-qwen-support.mjs'
 
-const config = loadConfig(); let provider; let barriers
+const config = loadConfig(); let provider; let barriers; let closePromise
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 function quote(value) { return `'${value.replaceAll("'", "'\\''")}'` }
 function persistenceRoot() { return join(realpathSync(config.osHome), config.mode === 'consumer' ? '.lumx' : '.lumx-developer', 'sessions') }
@@ -16,16 +17,19 @@ function continuity() {
   const bytes = readFileSync(path); if (hash(bytes) !== config.continuitySha256) throw new Error('continuity receipt differs from parent anchor')
   const value = JSON.parse(bytes); if (value.schema !== 'g9-b5-external-continuity/v1') throw new Error('continuity schema'); return value
 }
-export async function closeB5HostFactory() {
-  const currentBarriers = barriers; const current = provider
-  barriers = undefined; provider = undefined
-  currentBarriers?.streamRelease.resolve()
-  if (currentBarriers?.streamActive === true) await currentBarriers.streamFinished.promise
-  if (current !== undefined) await current.close()
+export function closeB5HostFactory() {
+  closePromise ??= (async () => {
+    const currentBarriers = barriers; const current = provider
+    barriers = undefined; provider = undefined
+    currentBarriers?.streamRelease.resolve()
+    if (currentBarriers?.streamActive === true) await currentBarriers.streamFinished.promise
+    if (current !== undefined) await current.close()
+  })()
+  return closePromise
 }
 export async function makeB5HostLaunchInput({ consumer, sourceAnchorSha256 }) {
   if (consumer !== 'external-qwen') throw new Error('external Qwen B5 factory consumer mismatch')
-  barriers = { streamActive: false, streamFirst: deferred(), streamRelease: deferred(), streamFinished: deferred(), cancelStarted: deferred(), cancelObserved: deferred() }
+  closePromise = undefined; barriers = { streamActive: false, streamFirst: deferred(), streamRelease: deferred(), streamFinished: deferred(), cancelStarted: deferred(), cancelObserved: deferred() }
   provider = await qwenStub({ worldEffect: config.worldEffect, rejectEffect: config.rejectEffect, lateEffect: config.lateEffect,
     toolCommand: `/usr/bin/printf %s B5_TOOL_OK >> ${quote(config.worldEffect)}`, rejectCommand: `/usr/bin/printf REJECTED > ${quote(config.rejectEffect)}`, lateCommand: `/usr/bin/printf LATE > ${quote(config.lateEffect)}` }, barriers)
   const identity = { credential: 'synthetic-b5-external', expiresAt: '2099-01-01T00:00:00.000Z', subject: 'synthetic-b5-user', type: 'lumx.local-auth.v1' }
@@ -61,6 +65,7 @@ async function resumePhase(host, runtimeAnchorSha256, qualification) {
   writeResult(config, { runtimeAnchorSha256, qualification, observations: { prior, after, bound, reopened, ui, exit }, counted_results: [unit('real/developer-Host-control', control, 'official browser UI create/cancel/restart'), unit('real/durable-UI-mapping', durable, 'same DSH/native identity over actual OS Host restart'), unit('real/DSH-non-AgentLoop-driver', driver, 'true external Qwen factory and official ACP')] })
 }
 export async function runB5HostScenario({ host, runtimeAnchorSha256, qualification }) {
-  try { return config.scenario === 'external-create' ? await createPhase(host, runtimeAnchorSha256, qualification) : await resumePhase(host, runtimeAnchorSha256, qualification) }
-  finally { await closeB5HostFactory() }
+  return withB5FactoryCleanup(closeB5HostFactory, async () => config.scenario === 'external-create'
+    ? createPhase(host, runtimeAnchorSha256, qualification)
+    : resumePhase(host, runtimeAnchorSha256, qualification))
 }

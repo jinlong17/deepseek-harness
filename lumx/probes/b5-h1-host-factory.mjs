@@ -3,25 +3,29 @@ import { randomUUID } from 'node:crypto'
 
 import { baseLaunch, check, freePort, loadConfig, pending, unit, writeResult } from './b5-hook-common.mjs'
 import { h1Stubs } from './b5-fixed-stubs.mjs'
+import { withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
 
-const config = loadConfig(); let stubs
+const config = loadConfig(); let stubs; let closePromise
 const count = (events, type) => events.filter(value => value === type).length
 function calls(summary, name) { return summary.calls.filter(value => value.name === name) }
 function results(summary, ids) { return summary.results.filter(value => ids.includes(value.callId) && value.isError) }
-export async function closeB5HostFactory() {
-  const current = stubs; stubs = undefined
-  if (current !== undefined) await current.close()
+export function closeB5HostFactory() {
+  closePromise ??= (async () => {
+    const current = stubs; stubs = undefined
+    if (current !== undefined) await current.close()
+  })()
+  return closePromise
 }
 export async function makeB5HostLaunchInput({ consumer, sourceAnchorSha256 }) {
   if (consumer !== 'governed-h1') throw new Error('H1 B5 factory consumer mismatch')
   if (config.scenario === 'h1-invalid-prepare') return { sourceAnchorSha256, launchInput: { ...baseLaunch(config, consumer, await freePort()), launchId: randomUUID(),
     h1: { brokerEndpoint: 'https://invalid.example/broker', modelEndpoint: 'https://invalid.example/model' } } }
-  stubs = await h1Stubs(config.nativeCanaryPath)
+  closePromise = undefined; stubs = await h1Stubs(config.nativeCanaryPath)
   return { sourceAnchorSha256, launchInput: { ...baseLaunch(config, consumer, await freePort()), launchId: randomUUID(),
     h1: { brokerEndpoint: stubs.brokerEndpoint, modelEndpoint: stubs.modelEndpoint }, qualification: { version: 1, operations: ['isolation-network', 'privacy-lifecycle', 'h1-observe'] } } }
 }
 export async function runB5HostScenario({ host, runtimeAnchorSha256, qualification }) {
-  try {
+  return withB5FactoryCleanup(closeB5HostFactory, async () => {
     const isolation = await host.control.qualify({ operation: 'isolation-network' })
     const privacy = await host.control.qualify({ operation: 'privacy-lifecycle' })
     const observed = await host.control.qualify({ operation: 'h1-observe', runId: config.runId })
@@ -56,5 +60,5 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
     ]
     writeResult(config, { runtimeAnchorSha256, qualification, observations: { qualification: observed, isolation, privacy, wire,
       childInventory: f.inventories.child, resumedInventory: f.inventories.resumed }, counted_results: [unit('real/H1-inventory', checks, 'actual governed H1 supported Host')] })
-  } finally { await closeB5HostFactory() }
+  })
 }

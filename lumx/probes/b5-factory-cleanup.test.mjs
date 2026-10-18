@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { after, test } from 'node:test'
 import { spawn } from 'node:child_process'
 
-import { closeB5HostOwners } from './b5-factory-cleanup.mjs'
+import { closeB5HostOwners, withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
 import { h1Stubs } from './b5-fixed-stubs.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -91,13 +91,15 @@ let stream = null;
 if (${JSON.stringify(stream)}) {
   stream = await fetch(launch.auth.endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'qwen', messages: [{ role: 'user', content: 'B5 STREAM' }] }) });
 }
-await closeB5HostFactory(); await closeB5HostFactory();
+const firstClose = closeB5HostFactory(); const secondClose = closeB5HostFactory();
+await Promise.allSettled([firstClose, secondClose]);
 const endpoints = launch.h1 ? [launch.h1.modelEndpoint, launch.h1.brokerEndpoint] : [launch.auth.endpoint];
-process.stdout.write(JSON.stringify({ endpoints, stream: stream === null ? null : await stream.text() }));`
+process.stdout.write(JSON.stringify({ endpoints, sameClose: firstClose === secondClose, stream: stream === null ? null : await stream.text() }));`
   await writeFile(script, source)
   const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])
   assert.equal(result.code, 0, result.stderr)
   const value = JSON.parse(result.stdout)
+  assert.equal(value.sameClose, true)
   for (const endpoint of value.endpoints) await closed(Number(new URL(endpoint).port))
   if (stream) assert.match(value.stream, /_FINAL/u)
 }
@@ -121,6 +123,19 @@ test('H1 partial listener acquisition closes the first listener and preserves bo
     error => error instanceof AggregateError && error.errors[0] === primary && error.errors[1] === cleanup,
   )
   assert.equal(closes, 1)
+})
+
+test('scenario cleanup preserves its primary error and memoizes the close outcome', async () => {
+  const primary = new Error('scenario'); const cleanup = new Error('cleanup'); let calls = 0
+  const close = () => {
+    calls += 1
+    return Promise.reject(cleanup)
+  }
+  await assert.rejects(
+    withB5FactoryCleanup(close, async () => { throw primary }),
+    error => error instanceof AggregateError && error.errors[0] === primary && error.errors[1] === cleanup,
+  )
+  assert.equal(calls, 1)
 })
 
 test('controller owner cleanup is ordered, attempts all owners, and retains primary plus cleanup errors', async () => {
