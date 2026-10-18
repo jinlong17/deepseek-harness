@@ -117,11 +117,13 @@ export class ExternalQwenAgent {
     this.#running.attempt.update(params); this.#toolUpdate(params.update)
   }
   async requestPermission(promptId, params) {
-    if (this.#running?.promptId !== promptId) return { outcome: { outcome: 'cancelled' } }
+    const running = this.#running; const abort = this.#abort
+    if (running?.promptId !== promptId || abort === undefined) return { outcome: { outcome: 'cancelled' } }
     if (params.sessionId !== this.nativeSessionId) return { outcome: { outcome: 'cancelled' } }
     const approval = this.ctx.get('approval'); const callId = params.toolCall?.toolCallId
     if (approval === undefined || typeof callId !== 'string') return { outcome: { outcome: 'cancelled' } }
-    const result = await approval.request({ agent: this, callId: ToolCallId(callId), toolName: params.toolCall.title ?? 'external-tool' })
+    const result = await approval.request({ agent: this, callId: ToolCallId(callId), toolName: params.toolCall.title ?? 'external-tool', signal: abort.signal })
+    if (this.#disposed || this.#running !== running || running.promptId !== promptId || abort.signal.aborted) return { outcome: { outcome: 'cancelled' } }
     if (result !== 'allowed-once' && result !== 'rejected') return { outcome: { outcome: 'cancelled' } }
     const wanted = result === 'allowed-once' ? 'allow_once' : 'reject_once'
     const option = params.options.find(value => value.kind === wanted)

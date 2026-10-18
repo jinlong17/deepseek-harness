@@ -11,8 +11,9 @@ import { createUserMessage } from '../../packages/llm/llm/lib/index.js'
 import JsonlSessionPersistence from '../../packages/session/session-persistence-jsonl/lib/index.js'
 import { createExternalEngineRouter, createExternalQwenFactory } from './external-agent-factory.mjs'
 
-async function runtime(t, engine, root) {
+async function runtime(t, engine, root, approval) {
   const ctx = new Context(); await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry)
+  if (approval !== undefined) ctx.provide('approval', approval)
   await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
   const router = createExternalEngineRouter(); engine.router = router
   const owner = createExternalQwenFactory(ctx, { artifactIdentity: 'artifact-sha256', engine, engineId: 'qwen-code-0.24.0', model: 'qwen3.7-max', provider: 'external-qwen', router })
@@ -154,4 +155,21 @@ test('resume durably repairs an interrupted external turn before native load', a
     'assistant/message', 'step/end', 'turn/end',
   ])
   assert.deepEqual(stored.events.map(event => event.seq), stored.events.map((_, index) => index))
+})
+
+test('a late permission approval after turn cancellation cannot authorize work', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-late-permission-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const engine = fakeEngine(); const entered = Promise.withResolvers(); const release = Promise.withResolvers(); let permission
+  engine.prompt = async (_input, { handleId, promptId }) => {
+    engine.calls.prompt += 1; entered.resolve()
+    permission = await engine.router.onPermission({ handleId, promptId, params: { sessionId: 'native-1',
+      toolCall: { toolCallId: 'tool-1', title: 'synthetic write' }, options: [{ kind: 'allow_once', optionId: 'allow' }] } })
+    return { result: { stopReason: 'cancelled' } }
+  }
+  const { ctx } = await runtime(t, engine, root, { request: async () => release.promise })
+  const handle = await ctx.agents.create({ sessionId: 'late-permission' }); handle.agent.followup(user()); await entered.promise
+  handle.agent.cancel({ kind: 'caller' }); release.resolve('allowed-once')
+  await assert.rejects(handle.agent.whenIdle())
+  assert.deepEqual(permission, { outcome: { outcome: 'cancelled' } })
+  await handle.dispose(); assert.equal(engine.calls.dispose, 1)
 })
