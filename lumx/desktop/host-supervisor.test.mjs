@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { launchLumxHost } from './host-supervisor.mjs'
+import { prepareLumxHostLaunch } from './host-launch-materials.mjs'
 
 const NODE = '/Users/jinlong/.local/opt/node-v24.20.0/bin/node'
 const NODE_SHA256 = '9d050fd455b56426e25d4d603c7c501cbb2630348e836cf221dcce748e90588a'
@@ -39,7 +40,7 @@ async function fixture(root, name) {
   const identity = { credential: `${name}-identity`, expiresAt: '2099-01-01T00:00:00.000Z', subject: name, type: 'lumx.local-auth.v1' }
   return { close: () => new Promise(resolveClose => { provider.closeAllConnections?.(); provider.close(resolveClose) }), launch: async (overrides = {}) => {
     const port = await freePort()
-    return launchLumxHost({
+    return launchLumxHost(await prepareLumxHostLaunch({
       auth: {
         byokKey: `${name}-provider-key`, endpoint: `http://127.0.0.1:${provider.address().port}/v1/chat/completions`,
         gateway: { validate: async value => ({ active: true, expiresAt: identity.expiresAt, subject: value.subject }) },
@@ -47,7 +48,7 @@ async function fixture(root, name) {
       },
       forkRoot: FORK, launchId: randomUUID(), mode: 'developer', nodePath: NODE, nodeSha256: NODE_SHA256,
       osHome, port, sourceRoot: SOURCE, workspaceDirectory, ...overrides,
-    })
+    }))
   }, osHome, requests: () => requests, workspaceDirectory }
 }
 
@@ -57,9 +58,9 @@ test('caller anchors and pre-cancel reject before native process creation', asyn
   const osHome = join(root, 'home'); const workspaceDirectory = join(root, 'workspace')
   mkdirSync(osHome); mkdirSync(workspaceDirectory)
   const base = { forkRoot: FORK, launchId: randomUUID(), mode: 'developer', nodePath: NODE, osHome, port: 12345, sourceRoot: SOURCE, workspaceDirectory }
-  await assert.rejects(launchLumxHost({ ...base, nodeSha256: '0'.repeat(64) }), /caller anchor/)
+  await assert.rejects(prepareLumxHostLaunch({ ...base, nodeSha256: '0'.repeat(64) }), /caller anchor/)
   const controller = new AbortController(); controller.abort(new Error('cancel-before-launch'))
-  await assert.rejects(launchLumxHost({ ...base, nodeSha256: NODE_SHA256, signal: controller.signal }), /cancel-before-launch/)
+  await assert.rejects(prepareLumxHostLaunch({ ...base, nodeSha256: NODE_SHA256, signal: controller.signal }), /cancel-before-launch/)
   assert.deepEqual(readdirSync(root).sort(), ['home', 'workspace'])
 })
 
@@ -69,10 +70,10 @@ test('developer data home cannot alias the sibling consumer home', async t => {
   const osHome = join(root, 'home'); const workspaceDirectory = join(root, 'workspace')
   mkdirSync(osHome); mkdirSync(workspaceDirectory); mkdirSync(join(osHome, '.lumx'))
   symlinkSync('.lumx', join(osHome, '.lumx-developer'))
-  await assert.rejects(launchLumxHost({
+  await assert.rejects(prepareLumxHostLaunch({
     forkRoot: FORK, launchId: randomUUID(), mode: 'developer', nodePath: NODE, nodeSha256: NODE_SHA256,
     osHome, port: 12345, sourceRoot: SOURCE, workspaceDirectory,
-  }), /must not be a symbolic link/)
+  }), /must be a direct directory/)
   assert.deepEqual(readdirSync(osHome).sort(), ['.lumx', '.lumx-developer'])
 })
 
@@ -154,9 +155,9 @@ test('supported native Host selects the isolated governed-H1 product composition
   const broker = await listen(async (request, response) => { brokerRequests += 1; for await (const _ of request) {};
     response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ ok: true })) })
   t.after(async () => { for (const server of [model, broker]) { server.closeAllConnections?.(); await new Promise(resolve => server.close(resolve)) } })
-  const host = await launchLumxHost({ consumer: 'governed-h1', forkRoot: FORK, launchId: randomUUID(), mode: 'developer', nodePath: NODE,
+  const host = await launchLumxHost(await prepareLumxHostLaunch({ consumer: 'governed-h1', forkRoot: FORK, launchId: randomUUID(), mode: 'developer', nodePath: NODE,
     nodeSha256: NODE_SHA256, osHome, port: await freePort(), sourceRoot: SOURCE, workspaceDirectory,
-    h1: { brokerEndpoint: `http://127.0.0.1:${broker.address().port}/broker`, modelEndpoint: `http://127.0.0.1:${model.address().port}/model` } })
+    h1: { brokerEndpoint: `http://127.0.0.1:${broker.address().port}/broker`, modelEndpoint: `http://127.0.0.1:${model.address().port}/model` } }))
   t.after(host.shutdown)
   assert.equal(host.consumer, 'governed-h1'); assert.equal(host.surface, 'official-dsh-web-profile-shared-host')
   const health = await host.control.healthCheck(); assert.equal(health.status, 'pass', JSON.stringify(health)); assert.equal(modelRequests, 1); assert.equal(brokerRequests, 0)

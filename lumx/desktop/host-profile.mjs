@@ -11,9 +11,9 @@ function parents(path) {
 }
 
 /** Exact product Host profile grants retained from the original live Host runner. */
-export function createLumxHostSandboxProfile({ dataHome, forkRoot, nodePath, runtime, sourceRoot, workspaceDirectory, ports }) {
-  const readable = [forkRoot, sourceRoot, dirname(dirname(nodePath))]
-  const writable = [runtime, dataHome, workspaceDirectory]
+export function createLumxHostSandboxProfile({ dataHome, forkRoot, nodePath, privateRoots, processHome, runtime, sourceRoot, temporary, workspaceDirectory, ports }) {
+  const readable = [forkRoot, sourceRoot, dirname(dirname(nodePath)), runtime]
+  const writable = [processHome, temporary, dataHome, workspaceDirectory]
   const lines = [
     '(version 1)', '(deny default)', '(deny network*)', '(allow process*)', '(allow sysctl-read)',
     '(allow file-read* (literal "/"))', '(allow file-read-metadata (literal "/tmp"))',
@@ -28,6 +28,7 @@ export function createLumxHostSandboxProfile({ dataHome, forkRoot, nodePath, run
     '(allow file-read* (literal "/dev/urandom"))')
   for (const path of readable) lines.push(`(allow file-read* (subpath ${quote(path)}))`)
   for (const path of writable) lines.push(`(allow file-read* (subpath ${quote(path)}))`, `(allow file-write* (subpath ${quote(path)}))`)
+  for (const path of privateRoots) lines.push(`(deny file-read* file-write* (subpath ${quote(path)}))`)
   for (const port of ports) {
     lines.push(`(allow network-bind (local tcp4 "localhost:${port}"))`)
     lines.push(`(allow network-inbound (local tcp4 "localhost:${port}"))`)

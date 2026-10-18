@@ -27,7 +27,7 @@ function timeout(promise, label, ms = WAIT_MS) {
 }
 function sb(path) { return JSON.stringify(realpathSync(path)) }
 
-export function qwenSandboxProfile({ nodePath, qwenRoot, relayPort, runtime, workspace, writable = [runtime], frozen = [] }) {
+export function qwenSandboxProfile({ nodePath, qwenRoot, relayPort, runtime, workspace, writable = [runtime], frozen = [], forbiddenFiles = [], forbiddenSubpaths = [] }) {
   return `${[
     '(version 1)', '(allow default)', '(deny network*)',
     '(allow file-read-metadata (literal "/"))',
@@ -48,6 +48,8 @@ export function qwenSandboxProfile({ nodePath, qwenRoot, relayPort, runtime, wor
     ...['/Users/jinlong/.codex/auth.json', '/Users/jinlong/.npmrc', '/Users/jinlong/.netrc']
       .map(path => `(deny file-read* file-write* (literal ${JSON.stringify(path)}))`),
     ...frozen.map(path => `(deny file-write* (subpath ${sb(path)}))`),
+    ...forbiddenSubpaths.map(path => `(deny file-read* file-write* (subpath ${JSON.stringify(resolve(path))}))`),
+    ...forbiddenFiles.map(path => `(deny file-read* file-write* (literal ${JSON.stringify(resolve(path))}))`),
   ].join('\n')}\n`
 }
 

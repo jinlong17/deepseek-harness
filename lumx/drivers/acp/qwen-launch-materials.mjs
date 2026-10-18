@@ -53,7 +53,7 @@ export function prepareQwenLaunch(input) {
     const guardian = buildLumxNativeGuardian(join(frozen, 'lumx-engine-guardian'))
     const profilePath = join(frozen, 'engine.sb')
     const profile = qwenSandboxProfile({ nodePath, qwenRoot, relayPort: exactPort(input.relayPort), runtime, workspace,
-      writable: [state, workspace], frozen: [frozen] })
+      writable: [state, workspace], frozen: [frozen], forbiddenFiles: input.forbiddenFiles ?? [], forbiddenSubpaths: input.forbiddenSubpaths ?? [] })
     writeFileSync(profilePath, profile, { mode: 0o400 }); chmodSync(frozen, 0o500)
     const mutablePaths = Object.freeze(Object.fromEntries(['state', 'home', 'qwenHome', 'tmp'].map(name => [name, directoryIdentity(paths[name])])))
     const anchors = Object.freeze({ nodeSha256: input.nodeSha256, qwenCliSha256: input.qwenCliSha256, qwenTreeSha256: input.qwenTreeSha256,

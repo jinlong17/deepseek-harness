@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 
 import { ClientSideConnection, PROTOCOL_VERSION } from '../../apps/cli/node_modules/@agentclientprotocol/sdk/dist/acp.js'
 import { launchLumxHost } from './host-supervisor.mjs'
+import { prepareLumxHostLaunch } from './host-launch-materials.mjs'
 
 function args(argv) { const values = new Map(); for (let i = 0; i < argv.length; i += 2) values.set(argv[i], argv[i + 1]); const get = key => { const value = values.get(key); if (!value) throw new Error(`missing ${key}`); return value }; return { forkRoot: get('--fork'), nodePath: get('--node'), nodeSha256: get('--node-sha256'), osHome: get('--home'), qwenCliPath: get('--qwen-cli'), qwenCliSha256: get('--qwen-cli-sha256'), qwenRoot: get('--qwen-root'), qwenTreeSha256: get('--qwen-tree-sha256'), runtimeParent: get('--runtime'), sourceRoot: get('--source'), workspaceDirectory: get('--workspace') } }
 async function listen(server) { await new Promise((resolveReady, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolveReady) }); return server.address().port }
@@ -23,12 +24,12 @@ export async function runExternalQwenHostProbe(input) {
   })
   const providerPort = await listen(provider); const identity = { credential: 'local-b4-host', expiresAt: '2099-01-01T00:00:00.000Z', subject: 'b4-host-user', type: 'lumx.local-auth.v1' }
   const launches = []; let sessionId
-  const launch = async () => launchLumxHost({ ...input, consumer: 'external-qwen', launchId: crypto.randomUUID(), mode: 'developer', port: await freePort(),
+  const launch = async () => launchLumxHost(await prepareLumxHostLaunch({ ...input, consumer: 'external-qwen', launchId: crypto.randomUUID(), mode: 'developer', port: await freePort(),
     auth: { byokKey: 'local-provider-key', endpoint: `http://127.0.0.1:${providerPort}/v1/chat/completions`, gateway: { validate: async value => ({ active: true, expiresAt: identity.expiresAt, subject: value.subject }) }, getIdentity: () => identity },
     external: { engineId: 'qwen-code-0.24.0', model: 'qwen3.7-max', qwenCliPath: input.qwenCliPath, qwenCliSha256: input.qwenCliSha256, qwenRoot: input.qwenRoot, qwenTreeSha256: input.qwenTreeSha256 },
-  })
+  }))
   try {
-    const first = await launch(); launches.push(first); const updates = []; const permissions = []; const health = await first.control.healthCheck(); if (health.status !== 'pass') throw new Error(`Host health failed: ${health.error}; ${JSON.stringify(first.external.observations())}`); const firstClient = client(first, updates, permissions)
+    const first = await launch(); launches.push(first); const updates = []; const permissions = []; const health = await first.control.healthCheck(); if (health.status !== 'pass') throw new Error(`Host health failed: ${health.error}`); const firstClient = client(first, updates, permissions)
     const initialized = await firstClient.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
     let created; try { created = await firstClient.newSession({ cwd: input.workspaceDirectory, mcpServers: [] }) } catch (error) { throw new Error(`front session/new failed: ${error.message}`, { cause: error }) }; sessionId = created.sessionId
     let prompt; try { prompt = await firstClient.prompt({ sessionId, prompt: [{ type: 'text', text: 'Return exactly B4_HOST_OK and use no tools.' }] }) } catch (error) { throw new Error(`front session/prompt failed: ${error.message}`, { cause: error }) }

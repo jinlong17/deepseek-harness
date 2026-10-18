@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 
 import { observeFileDescriptors } from '../desktop/fd-observer.mjs'
 import { launchLumxHost } from '../desktop/host-supervisor.mjs'
+import { prepareLumxHostLaunch } from '../desktop/host-launch-materials.mjs'
 
 const NODE = '/Users/jinlong/.local/opt/node-v24.20.0/bin/node'
 const NODE_SHA256 = '9d050fd455b56426e25d4d603c7c501cbb2630348e836cf221dcce748e90588a'
@@ -73,7 +74,7 @@ const provider = await listen(async (request, response) => {
 let identity = { credential: 'synthetic-identity', expiresAt: '2099-01-01T00:00:00.000Z', subject: 'b1-user', type: 'lumx.local-auth.v1' }
 let host
 try {
-  host = await launchLumxHost({
+  host = await launchLumxHost(await prepareLumxHostLaunch({
     auth: {
       byokKey: 'synthetic-provider-only', endpoint: `http://127.0.0.1:${provider.address().port}/v1/chat/completions`,
       gateway: { validate: async value => ({ active: true, expiresAt: identity?.expiresAt, subject: value.subject }) },
@@ -83,7 +84,7 @@ try {
     forkRoot: FORK, launchId: randomUUID(), mode: 'developer',
     nodePath: NODE, nodeSha256: NODE_SHA256, osHome, port: await freePort(), sourceRoot: SOURCE,
     workspaceDirectory: workspace,
-  })
+  }))
   const ready = await fetch(host.readyUrl, { redirect: 'manual' })
   const oldDirect = await directControl(host.hostProfile.path, canary)
   const positive = await host.control.healthCheck()
