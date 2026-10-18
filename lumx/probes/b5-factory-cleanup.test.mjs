@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process'
 
 import { closeB5HostOwners, withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
 import { h1Stubs } from './b5-fixed-stubs.mjs'
+import { listen } from './b5-hook-common.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '../..')
@@ -25,10 +26,11 @@ function runNode(script, args = [], options = {}) {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(node, [script, ...args], { cwd: root, stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'] })
     const stdout = []; const stderr = []
+    const timer = setTimeout(() => { child.kill('SIGTERM'); rejectRun(new Error(`child timed out: ${script}`)) }, 5_000)
     child.stdout?.on('data', chunk => stdout.push(chunk))
     child.stderr?.on('data', chunk => stderr.push(chunk))
-    child.once('error', rejectRun)
-    child.once('close', (code, signal) => resolveRun({ child, code, signal, stderr: Buffer.concat(stderr).toString('utf8'), stdout: Buffer.concat(stdout).toString('utf8') }))
+    child.once('error', error => { clearTimeout(timer); rejectRun(error) })
+    child.once('close', (code, signal) => { clearTimeout(timer); resolveRun({ child, code, signal, stderr: Buffer.concat(stderr).toString('utf8'), stdout: Buffer.concat(stdout).toString('utf8') }) })
   })
 }
 
@@ -82,33 +84,53 @@ async function fixture(name, scenario) {
   return { config, configPath, configSha256: await sha256(configPath), directory }
 }
 
-async function factoryCleanup(name, moduleName, scenario, consumer, stream = false) {
+async function factoryCleanup(name, moduleName, scenario, consumer, stream = 'none') {
   const state = await fixture(name, scenario); const script = join(state.directory, 'factory-child.mjs')
   const source = `import { makeB5HostLaunchInput, closeB5HostFactory } from ${JSON.stringify(pathToFileURL(modulePath(moduleName)).href)};
 const supplied = await makeB5HostLaunchInput({ consumer: ${JSON.stringify(consumer)}, sourceAnchorSha256: 'f'.repeat(64) });
 const launch = supplied.launchInput;
 let stream = null;
-if (${JSON.stringify(stream)}) {
+if (${JSON.stringify(stream)} !== 'none') {
   stream = await fetch(launch.auth.endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'qwen', messages: [{ role: 'user', content: 'B5 STREAM' }] }) });
 }
+if (${JSON.stringify(stream)} === 'abort') await stream.body.cancel();
 const firstClose = closeB5HostFactory(); const secondClose = closeB5HostFactory();
 await Promise.allSettled([firstClose, secondClose]);
 const endpoints = launch.h1 ? [launch.h1.modelEndpoint, launch.h1.brokerEndpoint] : [launch.auth.endpoint];
-process.stdout.write(JSON.stringify({ endpoints, sameClose: firstClose === secondClose, stream: stream === null ? null : await stream.text() }));`
+process.stdout.write(JSON.stringify({ endpoints, sameClose: firstClose === secondClose, stream: ${JSON.stringify(stream)} === 'finish' ? await stream.text() : null }));`
   await writeFile(script, source)
   const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])
   assert.equal(result.code, 0, result.stderr)
   const value = JSON.parse(result.stdout)
   assert.equal(value.sameClose, true)
   for (const endpoint of value.endpoints) await closed(Number(new URL(endpoint).port))
-  if (stream) assert.match(value.stream, /_FINAL/u)
+  if (stream === 'finish') assert.match(value.stream, /_FINAL/u)
 }
 
 test('each B5 factory closes prepared loopback resources idempotently before Host launch', async () => {
   await factoryCleanup('desktop', 'b5-desktop-host-factory.mjs', 'desktop-main', 'desktop-byok')
   await factoryCleanup('h1', 'b5-h1-host-factory.mjs', 'h1-valid', 'governed-h1')
-  await factoryCleanup('external-stream', 'b5-external-qwen-factory.mjs', 'external-create', 'external-qwen', true)
+  await factoryCleanup('external-stream', 'b5-external-qwen-factory.mjs', 'external-create', 'external-qwen', 'finish')
+  await factoryCleanup('external-abort', 'b5-external-qwen-factory.mjs', 'external-create', 'external-qwen', 'abort')
   await factoryCleanup('external-idle', 'b5-external-qwen-factory.mjs', 'external-create', 'external-qwen')
+})
+
+test('H1 partial listener acquisition closes a real first listener before rejecting', async () => {
+  let firstPort
+  let calls = 0
+  await assert.rejects(
+    h1Stubs('/tmp/canary', async handler => {
+      calls += 1
+      if (calls === 1) {
+        const first = await listen(handler)
+        firstPort = first.port
+        return first
+      }
+      throw new Error('second listener failed')
+    }),
+    /second listener failed/,
+  )
+  await closed(firstPort)
 })
 
 test('H1 partial listener acquisition closes the first listener and preserves both failures', async () => {

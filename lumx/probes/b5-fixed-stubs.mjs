@@ -65,11 +65,31 @@ export async function qwenStub(config, barriers) {
     const messages = JSON.stringify(payload.messages)
     if (messages.includes('B5 STREAM')) {
       barriers.streamActive = true
-      const base = { id: 'g9-b5-stream', object: 'chat.completion.chunk', created: 0, model: payload.model }
-      response.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { role: 'assistant', content: 'FIRST' }, finish_reason: null }] })}\n\n`)
-      barriers.streamFirst.resolve(); await barriers.streamRelease.promise
-      await new Promise(resolve => { response.once('finish', resolve); finish(response, payload, '_FINAL') })
-      barriers.streamFinished?.resolve(); return
+      let settled = false
+      const settle = () => {
+        if (settled) return
+        settled = true
+        barriers.streamFinished?.resolve()
+      }
+      const terminal = new Promise(resolve => {
+        const done = () => { settle(); resolve() }
+        response.once('finish', done)
+        response.once('close', done)
+        response.once('error', done)
+      })
+      try {
+        if (!response.destroyed && !response.writableEnded) {
+          const base = { id: 'g9-b5-stream', object: 'chat.completion.chunk', created: 0, model: payload.model }
+          response.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { role: 'assistant', content: 'FIRST' }, finish_reason: null }] })}\n\n`)
+        }
+        barriers.streamFirst.resolve()
+        await barriers.streamRelease.promise
+        if (!response.destroyed && !response.writableEnded) finish(response, payload, '_FINAL')
+        await terminal
+      } finally {
+        settle()
+      }
+      return
     }
     if (messages.includes('B5 CANCEL')) { barriers.cancelStarted.resolve(); response.once('close', () => { cancelCloses += 1; barriers.cancelObserved.resolve() }); return }
     const last = payload.messages?.at(-1)
