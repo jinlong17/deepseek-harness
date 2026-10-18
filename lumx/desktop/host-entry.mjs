@@ -30,7 +30,8 @@ if (!['desktop-byok', 'external-qwen', 'governed-h1', 'platform-stub'].includes(
 // are represented by the typed ready frame and must never enter that channel.
 console.log = () => {}; console.info = () => {}
 let runtime; let stopping; let rpc
-const pipe = createTypedPipe({ readable: process.stdin, writable: process.stdout, generation: input.generation, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor', onFrame })
+const pipe = createTypedPipe({ readable: process.stdin, writable: process.stdout, generation: input.generation, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor', onFrame,
+  endWritableOnClose: false })
 const acp = createAcpByteTransport(pipe)
 const remoteEngine = Object.freeze({
   create: (value, options) => rpc.request('create', value, options),

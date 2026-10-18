@@ -105,3 +105,24 @@ test('close waits for an in-flight write callback and writable finish barrier', 
   await closing
   assert.equal(closed, true)
 })
+
+test('a process-owned output can close transport state without ending the descriptor', async t => {
+  const input = new PassThrough(); let finalCalled = false; let releaseWrite
+  const output = new Writable({
+    write(_chunk, _encoding, callback) { releaseWrite = callback },
+    final(callback) { finalCalled = true; callback() },
+  })
+  const pipe = createTypedPipe({ readable: input, writable: output, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor',
+    generation: 'generation-123456', onFrame() {}, endWritableOnClose: false })
+  let sent = false; const sending = pipe.send({ channel: 'control', type: 'response', requestId: 'shutdown', payload: { ok: true } }).then(() => { sent = true })
+  await new Promise(resolve => setImmediate(resolve))
+  let closed = false; const closing = pipe.close().then(() => { closed = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(sent, false); assert.equal(closed, false)
+  releaseWrite(); await sending; await closing
+  assert.equal(finalCalled, false)
+  assert.equal(output.writableEnded, false)
+  await pipe.close()
+  await assert.rejects(pipe.send({ channel: 'control', type: 'ready', payload: {} }), /closed/u)
+  t.after(() => output.destroy())
+})

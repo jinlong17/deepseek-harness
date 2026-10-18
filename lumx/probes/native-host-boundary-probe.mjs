@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs'
+import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 
@@ -51,7 +51,7 @@ function directControl(profile, canary) {
 }
 
 const output = argument('--output')
-const canaryPath = argument('--canary')
+const canaryPath = realpathSync(argument('--canary'))
 const root = dirname(output)
 const osHome = join(root, 'os-home'); const workspace = join(root, 'workspace')
 mkdirSync(osHome, { recursive: true, mode: 0o700 }); mkdirSync(workspace, { recursive: true, mode: 0o700 })
@@ -80,7 +80,7 @@ try {
       gateway: { validate: async value => ({ active: true, expiresAt: identity?.expiresAt, subject: value.subject }) },
       getIdentity: () => identity,
     },
-    fdQualification: { canary, protectedPaths: [siblingCanary, osHomeCanary], targets: TARGETS },
+    fdQualification: { canary, protectedPaths: [canaryPath, siblingCanary, osHomeCanary], targets: TARGETS },
     forkRoot: FORK, launchId: randomUUID(), mode: 'developer',
     nodePath: NODE, nodeSha256: NODE_SHA256, osHome, port: await freePort(), sourceRoot: SOURCE,
     workspaceDirectory: workspace,

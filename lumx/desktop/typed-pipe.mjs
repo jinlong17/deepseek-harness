@@ -42,9 +42,10 @@ function validateFrame(value, expectedDirection, generation, expectedSeq) {
 }
 
 /** Versioned bounded newline transport for the private Host/supervisor pipes. */
-export function createTypedPipe({ readable, writable, incomingDirection, outgoingDirection, generation, onFrame, onFailure = () => {} }) {
+export function createTypedPipe({ readable, writable, incomingDirection, outgoingDirection, generation, onFrame, onFailure = () => {}, endWritableOnClose = true }) {
   if (!DIRECTIONS.has(incomingDirection) || !DIRECTIONS.has(outgoingDirection) || incomingDirection === outgoingDirection) throw new Error('LUMX typed pipe directions are invalid')
   if (typeof generation !== 'string' || generation.length < 16 || generation.length > 128) throw new Error('LUMX typed pipe generation is invalid')
+  if (typeof endWritableOnClose !== 'boolean') throw new Error('LUMX typed pipe close ownership is invalid')
   let incomingSeq = 0; let outgoingSeq = 0; let buffered = Buffer.alloc(0)
   let incomingBytes = 0; let outgoingBytes = 0; let incomingActive = false; let writing = false
   let ended = false; let closing = false; let failure
@@ -68,7 +69,7 @@ export function createTypedPipe({ readable, writable, incomingDirection, outgoin
   function rejectAll(queue, error) { for (const item of queue.splice(0)) item.result.reject(error) }
   function maybeClosed() {
     if (settled || failure !== undefined || !ended || incomingActive || incoming.length > 0 || writing || urgent.length > 0 || ordinary.length > 0) return
-    if (!writable.writableFinished) {
+    if (endWritableOnClose && !writable.writableFinished) {
       void finishWritable().then(maybeClosed, settleFailure)
       return
     }
@@ -178,7 +179,7 @@ export function createTypedPipe({ readable, writable, incomingDirection, outgoin
       }
     } finally {
       writing = false
-      if (closing && failure === undefined) {
+      if (closing && failure === undefined && endWritableOnClose) {
         try { await finishWritable() } catch (error) { settleFailure(error) }
       }
       maybeClosed()
@@ -209,7 +210,7 @@ export function createTypedPipe({ readable, writable, incomingDirection, outgoin
     if (settled) return lifecycle.promise
     closing = true; ended = true; readable.pause()
     rejectAll(urgent, new Error('LUMX typed pipe closed')); rejectAll(ordinary, new Error('LUMX typed pipe closed'))
-    if (!writing) {
+    if (!writing && endWritableOnClose) {
       try { await finishWritable() } catch (error) { settleFailure(error); throw error }
     }
     maybeClosed()
