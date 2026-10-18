@@ -20,14 +20,27 @@ interface EnvironmentPlan {
 }
 
 const BUILD_BASE_ENVIRONMENT = new Set(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ'])
+const MACOS_TEXT_ENCODING_KEY = '__CF_USER_TEXT_ENCODING'
+function currentMacOSTextEncoding(): string | undefined {
+  if (process.platform !== 'darwin' || typeof process.getuid !== 'function') return undefined
+  return `0x${process.getuid().toString(16).toUpperCase()}:0x0:0x0`
+}
 
+/** Remove only the observed Darwin per-user launch metadata before public build state. */
 function exactBuildEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const expectedMacOSLaunchMetadata = currentMacOSTextEncoding()
+  const discardMacOSLaunchMetadata = expectedMacOSLaunchMetadata !== undefined
+    && environment[MACOS_TEXT_ENCODING_KEY] === expectedMacOSLaunchMetadata
   const unexpected = Object.keys(environment)
     .filter(name => !BUILD_BASE_ENVIRONMENT.has(name)
-      && name !== CLIENT_BUILD_PROFILE_SELECTOR && !name.startsWith('DSH_CLIENT_'))
+      && name !== CLIENT_BUILD_PROFILE_SELECTOR && !name.startsWith('DSH_CLIENT_')
+      && !(discardMacOSLaunchMetadata && name === MACOS_TEXT_ENCODING_KEY))
     .sort()
   if (unexpected.length > 0) throw new Error(`unreviewed build environment keys: ${unexpected.join(', ')}`)
-  return environment
+  if (!discardMacOSLaunchMetadata) return environment
+  const normalized = { ...environment }
+  delete normalized[MACOS_TEXT_ENCODING_KEY]
+  return normalized
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
