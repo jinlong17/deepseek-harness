@@ -1,14 +1,23 @@
 import { spawn } from 'node:child_process'
+import { constants as osConstants } from 'node:os'
 import { Readable, Writable } from 'node:stream'
 
 import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION } from '../../../apps/cli/node_modules/@agentclientprotocol/sdk/dist/acp.js'
+import { captureBoundedTail, createBoundedNdjsonInput } from './bounded-ndjson.mjs'
 import { verifyQwenLaunch } from './qwen-launch-materials.mjs'
 
 const OPERATION_TIMEOUT_MS = 30_000
-function withTimeout(promise, label, ms = OPERATION_TIMEOUT_MS) {
+const UPDATE_TYPES = new Set(['user_message_chunk', 'agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update', 'plan', 'plan_update', 'plan_removed', 'available_commands_update', 'current_mode_update', 'config_option_update', 'session_info_update', 'usage_update', 'compaction_update', 'compaction_summary_chunk'])
+function timeout(promise, label, ms = OPERATION_TIMEOUT_MS) {
   let timer
   return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out`)), ms) })])
     .finally(() => clearTimeout(timer))
+}
+function abortable(promise, signal) {
+  signal.throwIfAborted(); const stopped = Promise.withResolvers()
+  const abort = () => stopped.reject(signal.reason)
+  signal.addEventListener('abort', abort, { once: true })
+  return Promise.race([promise, stopped.promise]).finally(() => signal.removeEventListener('abort', abort))
 }
 function outcome(child) { return new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal }))) }
 function id(value, label) {
@@ -16,7 +25,7 @@ function id(value, label) {
   return value
 }
 function fixedServers(value) {
-  if (!Array.isArray(value) || value.length > 16) throw new Error('Qwen fixed MCP server catalog is invalid')
+  if (!Array.isArray(value) || value.length > 16 || Buffer.byteLength(JSON.stringify(value)) > 256 * 1024) throw new Error('Qwen fixed MCP server catalog is invalid')
   return structuredClone(value)
 }
 function promptBlocks(value) {
@@ -25,137 +34,168 @@ function promptBlocks(value) {
     || Buffer.byteLength(JSON.stringify(value)) > 1024 * 1024) throw new Error('Qwen prompt payload is invalid')
   return value
 }
+function updateParams(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || Buffer.byteLength(JSON.stringify(value)) > 1024 * 1024) throw new Error('Qwen update is invalid')
+  id(value.sessionId, 'Qwen update sessionId')
+  if (value.update === null || typeof value.update !== 'object' || Array.isArray(value.update) || !UPDATE_TYPES.has(value.update.sessionUpdate)) throw new Error('Qwen update type is unsupported')
+  return value
+}
+function guardianControl(stream) {
+  const pid = Promise.withResolvers(); const exited = Promise.withResolvers(); let buffer = Buffer.alloc(0); let settled = false
+  const fail = error => { if (settled) return; settled = true; pid.reject(error); exited.reject(error) }
+  pid.promise.catch(() => {}); exited.promise.catch(() => {})
+  stream.on('data', chunk => {
+    if (settled) return
+    buffer = Buffer.concat([buffer, chunk])
+    if (buffer.length > 4096) return fail(new Error('Qwen guardian control exceeds fixed byte limit'))
+    for (;;) {
+      const newline = buffer.indexOf(0x0a); if (newline < 0) break
+      const line = buffer.subarray(0, newline).toString('utf8'); buffer = buffer.subarray(newline + 1)
+      let match = /^pid:([1-9][0-9]*)$/u.exec(line)
+      if (match) { pid.resolve(Number(match[1])); continue }
+      match = /^exit:(-1|[0-9]+):([0-9]+)$/u.exec(line)
+      if (!match) return fail(new Error('Qwen guardian control frame is invalid'))
+      settled = true; exited.resolve({ code: Number(match[1]) < 0 ? null : Number(match[1]), signal: Number(match[2]) || null })
+    }
+  })
+  stream.once('error', fail)
+  stream.once('end', () => { if (!settled) fail(new Error('Qwen guardian ended before reporting engine exit')) })
+  return { exited: exited.promise, pid: pid.promise }
+}
+function signalName(number) {
+  if (number === null) return null
+  return Object.entries(osConstants.signals).find(([, value]) => value === number)?.[0] ?? `SIG${number}`
+}
 
 /** Supervisor-owned official ACP client and Qwen process-group lifecycle. */
 export function createSupervisedQwenEngine({ materials, relay, model, mcpServers = [], onUpdate = () => {}, onPermission = async () => ({ outcome: { outcome: 'cancelled' } }) }) {
-  const handles = new Map()
-  const servers = fixedServers(mcpServers)
-  let accepting = true; let launches = 0
+  const handles = new Map(); const servers = fixedServers(mcpServers)
+  let accepting = true; let launches = 0; let closing
 
-  function launch(handleId) {
-    if (!accepting) throw new Error('Qwen engine is disposed')
+  function assertActive(record, signal) {
+    signal?.throwIfAborted()
+    if (!accepting || (record !== undefined && handles.get(record.handleId) !== record) || record?.disposing !== undefined) throw new Error('Qwen engine lifecycle is not active')
+  }
+
+  async function launch(handleId, signal) {
+    assertActive(undefined, signal)
     verifyQwenLaunch(materials, { requireInitialState: launches === 0 }); launches += 1
-    const argv = ['-f', materials.paths.profilePath, materials.nodePath, '--expose-gc', materials.qwenCliPath, '--acp', '--auth-type=openai']
+    assertActive(undefined, signal)
+    const qwenArgv = ['/usr/bin/sandbox-exec', '-f', materials.paths.profilePath, materials.nodePath, '--expose-gc', materials.qwenCliPath, '--acp', '--auth-type=openai']
     const env = { CI: '1', HOME: materials.paths.home, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', NO_COLOR: '1', NO_PROXY: '127.0.0.1,localhost',
       OPENAI_API_KEY: relay.capability, OPENAI_BASE_URL: relay.endpoint, PATH: '/usr/bin:/bin', QWEN_HOME: materials.paths.qwenHome,
       QWEN_TELEMETRY_ENABLED: '0', QWEN_USAGE_STATISTICS_ENABLED: '0', TMPDIR: materials.paths.tmp }
-    const child = spawn('/usr/bin/sandbox-exec', argv, { cwd: materials.paths.workspace, detached: true, env, stdio: ['pipe', 'pipe', 'pipe'] })
-    const exited = outcome(child); child.once('error', () => {})
-    let stderr = ''
-    child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr += chunk })
-    const guardian = spawn(materials.paths.guardian, [String(child.pid)], { env: { PATH: '/usr/bin:/bin' }, stdio: ['pipe', 'ignore', 'pipe'] })
+    const guardian = spawn(materials.paths.guardian, qwenArgv, { cwd: materials.paths.workspace, env, stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'] })
     const guardianExited = outcome(guardian); guardian.once('error', () => {})
-    let guardianError = ''
-    guardian.stderr.setEncoding('utf8'); guardian.stderr.on('data', chunk => { guardianError += chunk })
-    const record = { handleId, child, exited, guardian, guardianExited, stderr: () => stderr, guardianError: () => guardianError,
-      nativeSessionId: undefined, prompt: undefined, updates: 0, permissions: 0 }
-    const client = new ClientSideConnection(() => ({
-      requestPermission: async params => {
-        record.permissions += 1
-        if (record.prompt === undefined) throw new Error('Qwen permission request has no active prompt')
-        return onPermission({ handleId, promptId: record.prompt.id, params, signal: record.prompt.signal })
-      },
-      sessionUpdate: async params => {
-        record.updates += 1
-        if (record.prompt !== undefined) await onUpdate({ handleId, promptId: record.prompt.id, params })
-      },
-      readTextFile: async () => { throw new Error('Qwen client filesystem read capability is disabled') },
-      writeTextFile: async () => { throw new Error('Qwen client filesystem write capability is disabled') },
-    }), ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)))
-    record.client = client
-    void exited.then(() => { guardian.stdin.end() })
+    const control = guardianControl(guardian.stdout); const guardianDiagnostic = captureBoundedTail(guardian.stderr)
+    const qwenInput = guardian.stdio[3]; const qwenOutput = guardian.stdio[4]; const qwenError = guardian.stdio[5]
+    const qwenDiagnostic = captureBoundedTail(qwenError); const boundedOutput = createBoundedNdjsonInput(); qwenOutput.pipe(boundedOutput)
+    const record = { handleId, guardian, guardianExited, guardianDiagnostic, qwenDiagnostic, qwenExit: control.exited, qwenPid: undefined,
+      nativeSessionId: undefined, prompt: undefined, updates: 0, permissions: 0, disposing: undefined, client: undefined }
     handles.set(handleId, record)
-    return record
+    try {
+      record.client = new ClientSideConnection(() => ({
+        requestPermission: async params => {
+          record.permissions += 1; if (record.prompt === undefined) throw new Error('Qwen permission request has no active prompt')
+          return onPermission({ handleId, promptId: record.prompt.id, params, signal: record.prompt.signal })
+        },
+        sessionUpdate: async params => {
+          record.updates += 1; updateParams(params)
+          if (record.prompt !== undefined) await onUpdate({ handleId, promptId: record.prompt.id, params })
+        },
+        readTextFile: async () => { throw new Error('Qwen client filesystem read capability is disabled') },
+        writeTextFile: async () => { throw new Error('Qwen client filesystem write capability is disabled') },
+      }), ndJsonStream(Writable.toWeb(qwenInput), Readable.toWeb(boundedOutput)))
+      boundedOutput.once('error', () => { void dispose({ handleId }) })
+      assertActive(record, signal); guardian.stdin.write('S')
+      record.qwenPid = await abortable(timeout(control.pid, 'Qwen guarded spawn', 5_000), signal)
+      assertActive(record, signal)
+      return record
+    } catch (error) { await dispose({ handleId }).catch(() => {}); throw error }
   }
 
-  async function initialize(record) {
-    const initialized = await withTimeout(record.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} }), 'Qwen initialize')
+  async function initialize(record, signal) {
+    const initialized = await abortable(timeout(record.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} }), 'Qwen initialize'), signal)
+    assertActive(record, signal)
+    if (initialized.protocolVersion !== PROTOCOL_VERSION) throw new Error('Qwen negotiated an unexpected ACP protocol version')
     if (initialized.agentCapabilities?.loadSession !== true) throw new Error('Qwen did not advertise loadSession')
     return initialized
   }
 
-  async function create(input, context) {
-    const handleId = id(context.handleId, 'handleId')
+  async function create(_input, context) {
+    const handleId = id(context.handleId, 'handleId'); assertActive(undefined, context.signal)
     if (handles.has(handleId)) throw new Error('Qwen handle already exists')
-    await relay.admit('create', context.signal)
-    const record = launch(handleId)
+    await relay.admit('create', context.signal); assertActive(undefined, context.signal)
+    const record = await launch(handleId, context.signal)
     try {
-      const initialized = await initialize(record)
-      context.signal.throwIfAborted()
-      const session = await withTimeout(record.client.newSession({ cwd: materials.paths.workspace, mcpServers: servers }), 'Qwen newSession')
-      record.nativeSessionId = id(session.sessionId, 'nativeSessionId')
+      const initialized = await initialize(record, context.signal)
+      const session = await abortable(timeout(record.client.newSession({ cwd: materials.paths.workspace, mcpServers: servers }), 'Qwen newSession'), context.signal)
+      assertActive(record, context.signal); record.nativeSessionId = id(session.sessionId, 'nativeSessionId')
       return { initialized, nativeSessionId: record.nativeSessionId }
     } catch (error) { await dispose({ handleId }); throw error }
   }
 
   async function load(input, context) {
-    const handleId = id(context.handleId, 'handleId')
-    const nativeSessionId = id(input.nativeSessionId, 'nativeSessionId')
+    const handleId = id(context.handleId, 'handleId'); const nativeSessionId = id(input.nativeSessionId, 'nativeSessionId'); assertActive(undefined, context.signal)
     if (handles.has(handleId)) throw new Error('Qwen handle already exists')
-    await relay.admit('resume', context.signal)
-    const record = launch(handleId)
+    await relay.admit('resume', context.signal); assertActive(undefined, context.signal)
+    const record = await launch(handleId, context.signal)
     try {
-      const initialized = await initialize(record)
-      context.signal.throwIfAborted()
-      await withTimeout(record.client.loadSession({ cwd: materials.paths.workspace, mcpServers: servers, sessionId: nativeSessionId }), 'Qwen loadSession')
-      record.nativeSessionId = nativeSessionId
+      const initialized = await initialize(record, context.signal)
+      await abortable(timeout(record.client.loadSession({ cwd: materials.paths.workspace, mcpServers: servers, sessionId: nativeSessionId }), 'Qwen loadSession'), context.signal)
+      assertActive(record, context.signal); record.nativeSessionId = nativeSessionId
       return { initialized, nativeSessionId }
     } catch (error) { await dispose({ handleId }); throw error }
   }
 
   async function prompt(input, context) {
     const record = handles.get(id(context.handleId, 'handleId'))
-    if (record === undefined || record.nativeSessionId === undefined) throw new Error('Qwen handle is not active')
-    if (record.prompt !== undefined) throw new Error('Qwen handle already has a prompt')
-    const promptId = id(context.promptId, 'promptId')
-    await relay.admit('prompt', context.signal)
+    if (record === undefined) throw new Error('Qwen handle is not active')
+    assertActive(record, context.signal)
+    if (record.nativeSessionId === undefined || record.prompt !== undefined) throw new Error('Qwen handle is not ready for a prompt')
+    const promptId = id(context.promptId, 'promptId'); await relay.admit('prompt', context.signal); assertActive(record, context.signal)
     const abort = () => { void record.client.cancel({ sessionId: record.nativeSessionId }).catch(() => {}) }
-    context.signal.addEventListener('abort', abort, { once: true })
-    if (context.signal.aborted) abort()
-    record.prompt = { id: promptId, signal: context.signal }
+    context.signal.addEventListener('abort', abort, { once: true }); record.prompt = { id: promptId, signal: context.signal }
     try {
       const operation = record.client.prompt({ sessionId: record.nativeSessionId, prompt: promptBlocks(input.prompt) })
-      let result
-      try { result = await withTimeout(operation, 'Qwen prompt') }
-      catch (error) {
-        if (!context.signal.aborted) await record.client.cancel({ sessionId: record.nativeSessionId }).catch(() => {})
-        throw error
-      }
-      return { nativeSessionId: record.nativeSessionId, result }
-    } finally {
-      context.signal.removeEventListener('abort', abort)
-      record.prompt = undefined
-    }
+      try { return { nativeSessionId: record.nativeSessionId, result: await abortable(timeout(operation, 'Qwen prompt'), context.signal) } }
+      catch (error) { if (!context.signal.aborted) await record.client.cancel({ sessionId: record.nativeSessionId }).catch(() => {}); throw error }
+    } finally { context.signal.removeEventListener('abort', abort); if (record.prompt?.id === promptId) record.prompt = undefined }
   }
 
-  async function cancel({ handleId }) {
+  async function cancel({ handleId, promptId }) {
+    if (!accepting) throw new Error('Qwen engine is disposed')
+    const record = handles.get(id(handleId, 'handleId')); const expected = id(promptId, 'promptId')
+    if (record?.nativeSessionId !== undefined && record.prompt?.id === expected) await record.client.cancel({ sessionId: record.nativeSessionId })
+  }
+
+  function dispose({ handleId }) {
     const record = handles.get(handleId)
-    if (record?.nativeSessionId !== undefined) await record.client.cancel({ sessionId: record.nativeSessionId })
+    if (record === undefined) return Promise.resolve(undefined)
+    return (record.disposing ??= (async () => {
+      try {
+        record.guardian.stdin.end()
+        let guardianResult = await Promise.race([record.guardianExited, new Promise(resolve => setTimeout(() => resolve(undefined), 3_000))])
+        if (guardianResult === undefined && Number.isSafeInteger(record.qwenPid)) { try { process.kill(-record.qwenPid, 'SIGKILL') } catch {} }
+        if (guardianResult === undefined) { record.guardian.kill('SIGKILL'); guardianResult = await timeout(record.guardianExited, 'Qwen guardian reap', 2_000) }
+        let qwenResult
+        try { qwenResult = await timeout(record.qwenExit, 'Qwen exit report', 1_000) } catch { qwenResult = { code: null, signal: null } }
+        return { exit: { code: qwenResult.code, signal: signalName(qwenResult.signal) }, guardianExit: guardianResult,
+          stderr: record.qwenDiagnostic(), guardianError: record.guardianDiagnostic(), permissions: record.permissions, updates: record.updates }
+      } finally { if (handles.get(handleId) === record) handles.delete(handleId) }
+    })())
   }
 
-  async function dispose({ handleId }) {
-    const record = handles.get(handleId)
-    if (record === undefined) return
-    handles.delete(handleId)
-    record.guardian.stdin.end()
-    record.child.stdin.end()
-    let result = await Promise.race([record.exited, new Promise(resolve => setTimeout(() => resolve(undefined), 2_000))])
-    if (result === undefined) { try { process.kill(-record.child.pid, 'SIGTERM') } catch {}; result = await Promise.race([record.exited, new Promise(resolve => setTimeout(() => resolve(undefined), 2_000))]) }
-    if (result === undefined) { try { process.kill(-record.child.pid, 'SIGKILL') } catch {}; result = await withTimeout(record.exited, 'Qwen reap', 2_000) }
-    const guardianExit = await withTimeout(record.guardianExited, 'Qwen guardian reap', 2_000)
-    return { exit: result, guardianExit, stderr: record.stderr(), guardianError: record.guardianError(), permissions: record.permissions, updates: record.updates }
-  }
-
-  async function close() {
-    if (!accepting) return
-    accepting = false
-    const results = await Promise.allSettled([...handles.keys()].map(handleId => dispose({ handleId })))
-    await relay.dispose()
-    const failures = results.filter(result => result.status === 'rejected')
-    if (failures.length > 0) throw new AggregateError(failures.map(result => result.reason), 'Qwen engine teardown failed')
+  function close() {
+    return (closing ??= (async () => {
+      accepting = false
+      const results = await Promise.allSettled([...handles.values()].map(record => dispose({ handleId: record.handleId })))
+      await relay.dispose(); const failures = results.filter(result => result.status === 'rejected')
+      if (failures.length > 0) throw new AggregateError(failures.map(result => result.reason), 'Qwen engine teardown failed')
+    })())
   }
 
   return Object.freeze({ cancel, close, create, dispose, load, prompt,
-    stats: () => Object.freeze({ handles: handles.size, model,
-      processes: [...handles.values()].map(record => Object.freeze({ guardianPid: record.guardian.pid, qwenPid: record.child.pid })) }) })
+    stats: () => Object.freeze({ accepting, handles: handles.size, model,
+      processes: [...handles.values()].map(record => Object.freeze({ guardianPid: record.guardian.pid, qwenPid: record.qwenPid })) }) })
 }

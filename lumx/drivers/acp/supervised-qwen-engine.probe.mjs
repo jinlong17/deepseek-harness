@@ -58,12 +58,20 @@ export async function runSupervisedQwenProbe(options) {
       { handleId: 'handle-create', promptId: 'prompt-1', signal: new AbortController().signal })
     firstExit = await engine.dispose({ handleId: 'handle-create' })
     loaded = await engine.load({ nativeSessionId: created.nativeSessionId }, { handleId: 'handle-load', signal: new AbortController().signal })
-    secondExit = await engine.dispose({ handleId: 'handle-load' })
+    const disposeOne = engine.dispose({ handleId: 'handle-load' })
+    const disposeTwo = engine.dispose({ handleId: 'handle-load' })
+    const closing = engine.close()
+    if (disposeOne !== disposeTwo) throw new Error('concurrent disposal did not reuse the owned reap promise')
+    ;[secondExit] = await Promise.all([disposeOne, disposeTwo, closing])
+    let closedCreateRejected = false
+    try { await engine.create({}, { handleId: 'closed-handle', signal: new AbortController().signal }) }
+    catch (error) { closedCreateRejected = /disposed|lifecycle/u.test(String(error?.message)); if (!closedCreateRejected) throw error }
     return {
       anchors: materials.anchors, canonical: false, classification: 'B4 supervised-engine milestone probe',
       created: created.nativeSessionId, firstChunkBeforeProviderFinal: await firstChunk.promise <= await providerFinal.promise,
       lifecycle: { firstExit, secondExit }, loaded: loaded.nativeSessionId, providerRequests: requests.length,
       prompt: prompted.result, sameNativeSession: created.nativeSessionId === loaded.nativeSessionId,
+      closedCreateRejected, concurrentDisposeSamePromise: true,
       settingsPersisted: readFileSync(materials.paths.settings, 'utf8').length > 0, updates: updates.length,
     }
   } finally {
