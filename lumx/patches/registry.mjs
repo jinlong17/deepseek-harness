@@ -131,6 +131,23 @@ export const PRODUCT_PATCHES = Object.freeze([
   }),
   Object.freeze({
     files: Object.freeze([
+      'lumx/agent/external-session-eligibility-files.mjs',
+      'lumx/agent/external-session-eligibility.mjs',
+      'lumx/agent/external-agent-factory.mjs',
+      'lumx/desktop/host-entry.mjs', 'lumx/desktop/host-launch-materials.mjs',
+      'lumx/runtime/external-qwen-composition.mjs',
+    ]),
+    id: 'G9-1-P10',
+    purpose: 'Product-owned creation eligibility receipt that keeps uncommitted external-engine logs inspectable but refuses their native recovery.',
+    removal: 'Remove the eligibility store, its external factory and frozen Host wiring, and this registry entry together; P9 required binding ownership remains.',
+    removalPaths: Object.freeze(['lumx/agent/external-session-eligibility-files.mjs', 'lumx/agent/external-session-eligibility.mjs', 'lumx/agent/external-agent-factory.mjs', 'lumx/runtime/external-qwen-composition.mjs', 'lumx/patches/registry.mjs']),
+    tests: Object.freeze([
+      'node --test lumx/agent/external-session-eligibility.test.mjs lumx/agent/external-session-eligibility-process.test.mjs',
+      'node --test lumx/agent/external-agent-factory.test.mjs',
+    ]),
+  }),
+  Object.freeze({
+    files: Object.freeze([
       'lumx/desktop/native/bootstrap.c',
       'lumx/desktop/native/build.mjs',
       'lumx/desktop/fd-observer.mjs',

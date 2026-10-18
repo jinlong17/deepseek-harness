@@ -105,7 +105,9 @@ export async function prepareLumxHostLaunch(input) {
     const profilePath = join(frozen, 'lumx-host.sb'); writeFileSync(profilePath, profile, { mode: 0o400 })
     const payload = { consumer: selectedConsumer, mode: input.mode, osHome, workspaceDirectory, sourceRoot, port, environment, nodePath, generation: randomUUID(),
       ...selectedConsumer === 'desktop-byok' ? { modelEndpoint: `${relay.endpoint}/chat/completions`, relayCapability: relay.capability } : {},
-      ...selectedConsumer === 'external-qwen' ? { external: { artifactIdentity: externalOwner.artifactIdentity, engineId: externalOwner.engineId, model: externalOwner.model } } : {},
+      ...selectedConsumer === 'external-qwen' ? { external: { artifactIdentity: externalOwner.artifactIdentity,
+        eligibilityRoot: join(dataHome, 'external-agent-eligibility', 'v1'), engineId: externalOwner.engineId, mode: input.mode,
+        model: externalOwner.model, persistenceRoot: join(dataHome, 'sessions') } } : {},
       ...selectedConsumer === 'governed-h1' ? { h1: { brokerEndpoint: h1.broker.url, modelEndpoint: h1.model.url } } : {},
       fdTargets: input.fdQualification?.targets ?? [0, 3, 10, 11, 512], canary: input.fdQualification?.canary ?? { path: join(runtime, 'absent-canary'), dev: -1, ino: -1, bytes: 0, sha256: sha256('') },
       protectedPaths: input.fdQualification?.protectedPaths ?? [] }

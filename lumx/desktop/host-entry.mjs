@@ -70,7 +70,7 @@ try {
   const protectedPathErrors = {}; for (const path of input.protectedPaths) { try { readFileSync(path); protectedPathErrors[path] = 'READABLE' } catch (error) { protectedPathErrors[path] = error.code ?? error.name } }
   runtime = await launchLumxRuntimeInProcess({ consumer: input.consumer, mode: input.mode, osHome: input.osHome, workspaceDirectory: input.workspaceDirectory, sourceRoot: input.sourceRoot, port: input.port, environment: input.environment,
     ...input.consumer === 'desktop-byok' ? { auth: { byokKey: input.relayCapability, endpoint: input.modelEndpoint, relayOnly: true } } : {},
-    ...input.consumer === 'external-qwen' ? { external: { acp, artifactIdentity: input.external.artifactIdentity, engine: remoteEngine, engineId: input.external.engineId, model: input.external.model } } : {},
+    ...input.consumer === 'external-qwen' ? { external: { acp, ...input.external, engine: remoteEngine } } : {},
     ...input.consumer === 'governed-h1' ? { h1: input.h1 } : {} })
   await pipe.send({ channel: 'control', type: 'ready', payload: { pid: process.pid, baseUrl: runtime.baseUrl, readyUrl: runtime.readyUrl, consumer: runtime.consumer, surface: runtime.surface, governance: runtime.governance, fdObservation, childFdObservation, canaryPathError: pathError, protectedPathErrors, configSha256: sha256(configBytes) } })
 } catch (error) { process.stderr.write(`lumx-host-entry:${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); await shutdown().catch(() => {}); process.exit(1) }

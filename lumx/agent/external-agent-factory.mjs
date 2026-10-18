@@ -29,8 +29,9 @@ export function createExternalEngineRouter() {
 }
 
 /** Durable external-engine Agent factory; it never imports or wraps AgentLoop. */
-export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engineId, model, provider, router }) {
+export function createExternalQwenFactory(ctx, { artifactIdentity, eligibility, engine, engineId, model, provider, router }) {
   if (![artifactIdentity, engineId, model, provider].every(value => typeof value === 'string' && value.length > 0)) throw new Error('external Agent factory identity is incomplete')
+  if (eligibility?.prepareBirth === undefined || eligibility?.verifyCommitted === undefined) throw new Error('external Agent factory requires recovery eligibility')
   const live = new Set(); const pending = new Set(); const factoryAbort = new AbortController(); const factoryDisposal = new Error('external Agent factory disposed'); let accepting = true; let closing
 
   async function transact(ownerCtx, options, mode) {
@@ -46,7 +47,7 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engin
     const sessionId = mode === 'create' ? options.sessionId : options.resumeSessionId
     let session = mode === 'create' ? ctx.sessions.prepare(sessionId, { ...options.seed === undefined ? {} : { seed: options.seed },
       ...options.meta === undefined ? {} : { meta: options.meta }, ...options.inheritedEventCount === undefined ? {} : { inheritedEventCount: options.inheritedEventCount } }) : undefined
-    let storage; let handleId; let agent; let detachSession; let detachAgent; let detachRoute; let persistedCount = 0; let published = false
+    let storage; let handleId; let agent; let birth; let detachSession; let detachAgent; let detachRoute; let persistedCount = 0; let published = false
     try {
       storage = mode === 'create' ? await persistence.create(session.header, { signal }) : await persistence.open(sessionId, 'write', { signal })
       assertTransaction()
@@ -55,6 +56,7 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engin
       } else {
         const read = await storage.read(0, undefined, { signal }); assertTransaction()
         bindingOf(read.events, { artifactIdentity, engineId })
+        eligibility.verifyCommitted({ ownedWriteHandle: storage, events: read.events })
         const closers = interruptedTurnClosers(read.events)
         if (closers.length > 0) await storage.append(closers, { signal })
         persistedCount = read.events.length + closers.length
@@ -75,10 +77,15 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engin
       const suffix = session.snapshotEvents(persistedCount)
       if (suffix.length > 0) await storage.append(suffix, { signal })
       await storage.flush({ signal }); assertTransaction()
+      if (mode === 'create') {
+        const stored = await storage.read(0, undefined, { signal }); assertTransaction()
+        birth = await eligibility.prepareBirth({ ownedCreateHandle: storage, events: stored.events }); assertTransaction()
+      }
 
       let disposeCore
       const dispose = () => (disposeCore ??= (async () => {
         const failures = []
+        if (birth !== undefined && birth.state() !== 'accepted') try { birth.rejectSync('owner-disposal') } catch (error) { failures.push(error) }
         try { await agent.dispose() } catch (error) { failures.push(error) }
         detachRoute?.(); detachAgent?.(); detachSession?.()
         try { await storage.close() } catch (error) { failures.push(error) }
@@ -89,15 +96,21 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engin
       })())
       disposeOwned = async ownerTriggered => { if (!ownerTriggered) await Promise.resolve(releaseOwner()); await dispose() }
       setupCommit?.commit(); assertTransaction()
+      birth?.commitSync(); assertTransaction()
       detachSession = ctx.sessions.enter(session); detachAgent = ctx.agents.enter(agent, options.parentAgent)
       ctx.sessions.announce(session); await ctx.agents.announce(agent, mode === 'create' ? 'startup' : 'resume', signal)
-      assertTransaction(); published = true; live.add(disposeOwned); agent.activate()
+      assertTransaction(); birth?.accept(); published = true; live.add(disposeOwned); agent.activate()
       return Object.freeze({ agent, dispose: disposeOwned })
     } catch (error) {
       if (!published) {
-        await disposeOwned?.().catch(() => {}); detachRoute?.(); detachAgent?.(); detachSession?.()
-        if (handleId !== undefined) await engine.dispose({ handleId }).catch(() => {})
-        await storage?.close().catch(() => {}); await agent?.scope.dispose().catch(() => {}); await Promise.resolve(releaseOwner()).catch(() => {})
+        const cleanup = []
+        try { birth?.rejectSync('transaction-rejected') } catch (cleanupError) { cleanup.push(cleanupError) }
+        try { await disposeOwned?.() } catch (cleanupError) { cleanup.push(cleanupError) }; detachRoute?.(); detachAgent?.(); detachSession?.()
+        if (disposeOwned === undefined && handleId !== undefined) try { await engine.dispose({ handleId }) } catch (cleanupError) { cleanup.push(cleanupError) }
+        if (disposeOwned === undefined) try { await storage?.close() } catch (cleanupError) { cleanup.push(cleanupError) }
+        if (disposeOwned === undefined) try { await agent?.scope.dispose() } catch (cleanupError) { cleanup.push(cleanupError) }
+        try { await Promise.resolve(releaseOwner()) } catch (cleanupError) { cleanup.push(cleanupError) }
+        if (cleanup.length > 0) throw new AggregateError([error, ...cleanup], `external Agent transaction failed and cleanup was incomplete: ${error instanceof Error ? error.message : String(error)}`)
       }
       throw error
     }

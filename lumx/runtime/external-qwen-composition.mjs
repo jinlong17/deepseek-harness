@@ -1,7 +1,8 @@
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { createExternalEngineRouter, createExternalQwenFactory } from '../agent/external-agent-factory.mjs'
+import { createExternalSessionEligibilityStore } from '../agent/external-session-eligibility.mjs'
 
 const PROVIDER = 'external-qwen'
 
@@ -13,6 +14,9 @@ export async function installExternalQwenComposition(ctx, input) {
   const agentLoop = await import(moduleUrl('packages/core/agent-loop/lib/index.js'))
   const sdk = await import(moduleUrl('apps/cli/node_modules/@agentclientprotocol/sdk/dist/acp.js'))
   const router = createExternalEngineRouter()
+  if (resolve(ctx.sessionPersistence.config?.root ?? '') !== resolve(input.persistenceRoot)) throw new Error('external Qwen persistence root differs from frozen product configuration')
+  const eligibility = createExternalSessionEligibilityStore({ eligibilityRoot: input.eligibilityRoot, mode: input.mode,
+    persistenceRoot: input.persistenceRoot, persistenceScope: input.persistenceRoot })
   ctx.sessionProjections.register(agentLoop.turnBoundaryProjectionDefinition)
   ctx.sessionProjections.register(agentLoop.inboxProjectionDefinition)
   class CatalogOnlyAdapter extends llm.LlmAdapter {
@@ -25,10 +29,10 @@ export async function installExternalQwenComposition(ctx, input) {
     async * stream() { throw new Error('external Qwen model stream is available only through the external Agent factory') }
   }
   const releaseCatalog = ctx.llm.registerAdapter([PROVIDER], new CatalogOnlyAdapter())
-  const factory = createExternalQwenFactory(ctx, { artifactIdentity: input.artifactIdentity, engine: input.engine,
+  const factory = createExternalQwenFactory(ctx, { artifactIdentity: input.artifactIdentity, eligibility, engine: input.engine,
     engineId: input.engineId, model: input.model, provider: PROVIDER, router })
   acp.apply(ctx, { provider: PROVIDER, model: input.model, stream: sdk.ndJsonStream(input.acp.writable, input.acp.readable) })
   let closed
   const close = () => (closed ??= (async () => { await factory.close(); releaseCatalog() })())
-  return Object.freeze({ close, factory, router })
+  return Object.freeze({ close, eligibility: eligibility.roots, factory, router })
 }

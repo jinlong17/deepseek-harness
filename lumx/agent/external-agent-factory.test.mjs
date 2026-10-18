@@ -10,13 +10,15 @@ import SessionStore from '../../packages/core/session/lib/index.js'
 import { createUserMessage } from '../../packages/llm/llm/lib/index.js'
 import JsonlSessionPersistence from '../../packages/session/session-persistence-jsonl/lib/index.js'
 import { createExternalEngineRouter, createExternalQwenFactory } from './external-agent-factory.mjs'
+import { createExternalSessionEligibilityStore } from './external-session-eligibility.mjs'
 
 async function runtime(t, engine, root, approval) {
   const ctx = new Context(); await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry)
   if (approval !== undefined) ctx.provide('approval', approval)
   await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
   const router = createExternalEngineRouter(); engine.router = router
-  const owner = createExternalQwenFactory(ctx, { artifactIdentity: 'artifact-sha256', engine, engineId: 'qwen-code-0.24.0', model: 'qwen3.7-max', provider: 'external-qwen', router })
+  const eligibility = createExternalSessionEligibilityStore({ eligibilityRoot: `${root}-eligibility`, mode: 'developer', persistenceRoot: root, persistenceScope: root })
+  const owner = createExternalQwenFactory(ctx, { artifactIdentity: 'artifact-sha256', eligibility, engine, engineId: 'qwen-code-0.24.0', model: 'qwen3.7-max', provider: 'external-qwen', router })
   t.after(async () => { await owner.close().catch(() => {}); await ctx.fiber.dispose().catch(() => {}) })
   return { ctx, owner, router }
 }
@@ -75,6 +77,20 @@ test('creation listeners can queue work but rejection causes zero prompt before 
   ctx.on('agent/created', async ({ agent }) => { agent.followup(user()); await new Promise(resolve => setImmediate(resolve)); throw new Error('creation listener refused') })
   await assert.rejects(ctx.agents.create({ sessionId: 'listener-refused' }), /creation listener refused/)
   assert.equal(engine.calls.prompt, 0); assert.equal(ctx.agents.get('listener-refused'), undefined)
+  const recovering = fakeEngine(); const fresh = await runtime(t, recovering, root)
+  await assert.rejects(fresh.ctx.agents.resume({ resumeSessionId: 'listener-refused' }), /not committed/)
+  assert.equal(recovering.calls.load, 0); assert.equal(recovering.calls.create, 0)
+})
+
+test('a throwing setup commit guard leaves an inspectable log but zero recovery engine IO', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-guard-refused-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const firstEngine = fakeEngine(); const first = await runtime(t, firstEngine, root)
+  await assert.rejects(first.ctx.agents.create({ sessionId: 'guard-refused', setup: () => ({ commit() { throw new Error('guard refused publication') } }) }), /guard refused publication/)
+  const inspect = await first.ctx.sessionPersistence.open('guard-refused', 'read'); assert.equal((await inspect.read()).events[0].type, 'agent/external-engine-bound'); await inspect.close()
+  await first.owner.close(); await first.ctx.fiber.dispose()
+  const recovering = fakeEngine(); const fresh = await runtime(t, recovering, root)
+  await assert.rejects(fresh.ctx.agents.resume({ resumeSessionId: 'guard-refused' }), /not committed/)
+  assert.equal(recovering.calls.load, 0); assert.equal(recovering.calls.create, 0)
 })
 
 test('factory close aborts and drains a pending transaction without late publication', async t => {
