@@ -4,6 +4,8 @@ import { createReadStream, createWriteStream, lstatSync, readFileSync, realpathS
 import { resolve } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 
+import { verifyB5HostOwnershipAck } from './b5-owner-protocol.mjs'
+
 const MAX_FRAME = 64 * 1024
 const TYPES = ['runtime-profile', 'runtime-config', 'runtime-bootstrap', 'runtime-entry']
 const ROLES = new Set(['host', 'engine-qualification', 'h1-grant'])
@@ -70,15 +72,6 @@ function verifyAck(ack, ready) {
   const wanted = Object.fromEntries(ready.materials.map(value => [value.material_id, value.sha256]))
   if (canonical(ack.material_sha256) !== canonical(wanted)) throw new Error('ACK material hash mismatch')
 }
-function verifyOwnershipAck(ack, owner) {
-  const keys = Object.keys(ack ?? {}).sort().join(',')
-  if (keys !== 'generation,nonce,pid,pgid,runtime_anchor_sha256,schema'
-    || ack.schema !== 'g9-b5-host-owner-ack/v1' || !same(ack.nonce ?? '', owner.nonce)
-    || !same(ack.runtime_anchor_sha256 ?? '', owner.runtime_anchor_sha256)
-    || !same(ack.generation ?? '', owner.generation) || ack.pid !== owner.pid || ack.pgid !== owner.pgid) {
-    throw new Error('Host ownership ACK identity mismatch')
-  }
-}
 
 async function cleanup(retained, host, primary) {
   const failures = []
@@ -139,7 +132,7 @@ async function main() {
         config_sha256: retained.anchors.configFileSha256, profile_sha256: retained.anchors.profileSha256,
         pid: owner.pid, pgid: owner.pgid })
       await write(ready, ownership)
-      verifyOwnershipAck(await read(ack, ackTimeout(args['ack-timeout-ms'])), ownership)
+      verifyB5HostOwnershipAck(await read(ack, ackTimeout(args['ack-timeout-ms'])), ownership)
     } })
     if (typeof factory.runB5HostScenario !== 'function') throw new Error('scenario runner required')
     const qualification = Object.freeze({ consumer, host: Object.freeze({ configSha256: host.configSha256, generation: host.generation, pid: host.pid,

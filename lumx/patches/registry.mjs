@@ -165,6 +165,8 @@ export const PRODUCT_PATCHES = Object.freeze([
       'lumx/probes/b5-host-h1-qualification.mjs',
       'lumx/probes/b5-host-privacy-qualification.mjs',
       'lumx/probes/b5-host-qualification.mjs',
+      'lumx/probes/b5-owner-protocol.mjs',
+      'lumx/probes/b5-owner-protocol.test.mjs',
       'lumx/probes/gate1-prepared-host-controller.mjs',
       'lumx/runtime/internal-launch.mjs',
       'scripts/b5-client-build-environment-helper.ts',
@@ -182,6 +184,7 @@ export const PRODUCT_PATCHES = Object.freeze([
     ]),
     tests: Object.freeze([
       'node --test lumx/desktop/typed-pipe.test.mjs',
+      'node --test lumx/probes/b5-owner-protocol.test.mjs',
       'node lumx/probes/gate1-prepared-host-controller.mjs <caller-anchored qualification arguments>',
       'node scripts/b5-client-build-environment-helper.ts <caller-anchored environment fixture>',
     ]),
