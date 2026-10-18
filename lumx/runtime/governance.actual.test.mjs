@@ -78,7 +78,7 @@ test('actual candidate composition denies late mutations and shuts down cleanly'
   assert.equal(childGroup.data.length, 0)
   await childGroup.update([{ id: 'child-protected-alias', name: target.specifier, disabled: true }])
   assert.equal(childGroup.data[0], runtime.ctx.loader.store['child-protected-alias'].options)
-  assert.deepEqual(await runtime.shutdown(), undefined)
+  assert.deepEqual(await runtime.shutdown(), {})
 })
 
 test('actual candidate rejects later resolver generation changes before unrelated admission or direct activation', { timeout: 30_000 }, async t => {
