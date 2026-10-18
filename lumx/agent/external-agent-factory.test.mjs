@@ -169,7 +169,7 @@ test('a late permission approval after turn cancellation cannot authorize work',
   const { ctx } = await runtime(t, engine, root, { request: async () => release.promise })
   const handle = await ctx.agents.create({ sessionId: 'late-permission' }); handle.agent.followup(user()); await entered.promise
   handle.agent.cancel({ kind: 'caller' }); release.resolve('allowed-once')
-  await assert.rejects(handle.agent.whenIdle())
+  await handle.agent.whenIdle()
   assert.deepEqual(permission, { outcome: { outcome: 'cancelled' } })
   await handle.dispose(); assert.equal(engine.calls.dispose, 1)
 })
@@ -193,6 +193,21 @@ test('cancel quiescence waits for remote prompt drain while another Agent remain
   first.agent.followup(user()); await entered.promise; first.agent.cancel({ kind: 'caller' }); await cancelEntered.promise
   let idle = false; const waiting = first.agent.whenIdle().finally(() => { idle = true }); await new Promise(resolve => setImmediate(resolve)); assert.equal(idle, false)
   second.agent.followup(user()); await second.agent.whenIdle(); assert.equal(second.agent.status, 'idle')
-  cancelRelease.resolve(); await assert.rejects(waiting); assert.equal(idle, true)
+  cancelRelease.resolve(); await waiting; assert.equal(idle, true)
   await first.dispose(); await second.dispose(); assert.equal(engine.calls.dispose, 2)
+})
+
+test('external native tools persist one advertised call/result lifecycle', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-tool-lifecycle-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const engine = fakeEngine(); const { ctx } = await runtime(t, engine, root)
+  engine.prompt = async (_input, { handleId, promptId }) => {
+    const sessionId = 'native-1'; const base = { handleId, promptId, params: { sessionId } }
+    await engine.router.onUpdate({ ...base, params: { sessionId, update: { sessionUpdate: 'tool_call', toolCallId: 'tool-1', title: 'native-shell', rawInput: { command: 'true' }, status: 'in_progress' } } })
+    await engine.router.onUpdate({ ...base, params: { sessionId, update: { sessionUpdate: 'tool_call_update', toolCallId: 'tool-1', status: 'completed', rawOutput: { exitCode: 0 } } } })
+    await engine.router.onUpdate({ ...base, params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'done' } } } })
+    return { result: { stopReason: 'end_turn' } }
+  }
+  const handle = await ctx.agents.create({ sessionId: 'external-tool-session' }); handle.agent.followup(user()); await handle.agent.whenIdle(); await ctx.sessionPersistence.flush(); await handle.dispose()
+  const stored = await ctx.sessionPersistence.open('external-tool-session', 'read'); const types = (await stored.read()).events.map(event => event.type); await stored.close()
+  assert.deepEqual(types.filter(type => type === 'assistant/message' || type === 'tool/call' || type === 'tool/result'), ['assistant/message', 'tool/call', 'tool/result', 'assistant/message'])
 })

@@ -129,6 +129,15 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
     return initialized
   }
 
+  async function selectFixedMode(record, response, signal) {
+    const modes = response?.modes
+    if (!Array.isArray(modes?.availableModes) || !modes.availableModes.some(mode => mode?.id === 'default')) {
+      throw new Error('Qwen did not advertise the fixed default approval mode')
+    }
+    await abortable(timeout(record.client.setSessionMode({ sessionId: record.nativeSessionId, modeId: 'default' }), 'Qwen fixed session mode'), signal)
+    assertActive(record, signal)
+  }
+
   async function create(_input, context) {
     const handleId = id(context.handleId, 'handleId'); assertActive(undefined, context.signal)
     reserve(handleId); let record
@@ -139,7 +148,8 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
       const initialized = await initialize(record, context.signal)
       record.phase = 'loading'
       const session = await abortable(timeout(record.client.newSession({ cwd: materials.paths.workspace, mcpServers: servers }), 'Qwen newSession'), context.signal)
-      assertActive(record, context.signal); record.nativeSessionId = id(session.sessionId, 'nativeSessionId'); record.phase = 'ready'
+      assertActive(record, context.signal); record.nativeSessionId = id(session.sessionId, 'nativeSessionId')
+      await selectFixedMode(record, session, context.signal); record.phase = 'ready'
       return { initialized, nativeSessionId: record.nativeSessionId }
     } catch (error) { reservations.delete(handleId); await dispose({ handleId }); throw error }
   }
@@ -153,8 +163,9 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
       record = await launch(handleId, context.signal); reservations.delete(handleId)
       const initialized = await initialize(record, context.signal)
       record.phase = 'loading'
-      await abortable(timeout(record.client.loadSession({ cwd: materials.paths.workspace, mcpServers: servers, sessionId: nativeSessionId }), 'Qwen loadSession'), context.signal)
-      assertActive(record, context.signal); record.nativeSessionId = nativeSessionId; record.phase = 'ready'
+      const session = await abortable(timeout(record.client.loadSession({ cwd: materials.paths.workspace, mcpServers: servers, sessionId: nativeSessionId }), 'Qwen loadSession'), context.signal)
+      assertActive(record, context.signal); record.nativeSessionId = nativeSessionId
+      await selectFixedMode(record, session, context.signal); record.phase = 'ready'
       return { initialized, nativeSessionId }
     } catch (error) { reservations.delete(handleId); await dispose({ handleId }); throw error }
   }

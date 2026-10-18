@@ -38,14 +38,13 @@ export async function runExternalQwenHostProbe(input) {
     await secondClient.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} }); await secondClient.resumeSession({ sessionId, cwd: input.workspaceDirectory, mcpServers: [] })
     const resumed = await secondClient.prompt({ sessionId, prompt: [{ type: 'text', text: 'Return exactly B4_HOST_OK again and use no tools.' }] }); const secondExit = await second.shutdown()
     return { canonical: false, classification: 'B4 supported Host/official ACP product probe', health, initialized, prompt, resumed, sessionId,
-      requests: requests.length, finalAt, firstExit, secondExit, updateTypes: updates.concat(resumedUpdates).map(value => value.update.sessionUpdate),
+      requests: requests.length, requestTools: requests.map(value => value.tools?.map(tool => tool.function?.name ?? tool.name) ?? []), finalAt, firstExit, secondExit, updateTypes: updates.concat(resumedUpdates).map(value => value.update.sessionUpdate),
       dataHome: `${realpathSync(input.osHome)}/.lumx-developer`, permissions: permissions.length }
   } catch (error) { process.stderr.write(`${launches.map(host => host.stderr()).join('\n')}\n`); throw error }
   finally { for (const host of launches) await host.shutdown().catch(() => {}); provider.closeAllConnections?.(); await new Promise(resolveClose => provider.close(resolveClose)) }
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) {
-  process.on('unhandledRejection', error => { process.stderr.write(`probe-unhandled:${error?.stack ?? String(error)}\n`) })
   const input = args(process.argv.slice(2)); for (const path of [input.osHome, input.runtimeParent, input.workspaceDirectory]) mkdirSync(path, { recursive: true, mode: 0o700 })
   try { process.stdout.write(`${JSON.stringify(await runExternalQwenHostProbe(input), null, 2)}\n`) } finally { rmSync(input.runtimeParent, { recursive: true, force: true }) }
 }

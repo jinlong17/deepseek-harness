@@ -167,20 +167,24 @@ export class ExternalQwenAgent {
     } catch (error) {
       attempt.abandon(abort.signal.aborted); this.session.append('step/end', { turn, step })
       const reason = abort.signal.aborted ? { kind: 'aborted', reason: abort.signal.reason } : { kind: 'error', error: failure(error) }
-      this.session.append('turn/end', { turn, reason }); if (!abort.signal.aborted) this.dispatch.emit('agent/error', { turn, step, error }); throw error
+      this.session.append('turn/end', { turn, reason })
+      if (!abort.signal.aborted) { this.dispatch.emit('agent/error', { turn, step, error }); throw error }
     }
   }
   #toolUpdate(update) {
     if (update.sessionUpdate !== 'tool_call' && update.sessionUpdate !== 'tool_call_update') return
     const callId = ToolCallId(update.toolCallId); let record = this.#toolCalls.get(callId)
     if (record === undefined) {
+      const name = update.title ?? 'external-tool'; const arguments_ = JSON.stringify(update.rawInput ?? {})
       record = { complete: false }; this.#toolCalls.set(callId, record)
-      this.session.append('tool/call', { turn: this.lastTurn, step: 1, callId, name: update.title ?? 'external-tool', arguments: JSON.stringify(update.rawInput ?? {}) })
+      this.session.append('assistant/message', { turn: this.lastTurn, step: 1,
+        message: createAssistantMessage({ content: [{ type: 'tool-call', id: callId, name, arguments: arguments_ }], source: { provider: this.provider, model: this.model } }) }, { surfaceOp: 'append' })
+      this.session.append('tool/call', { turn: this.lastTurn, step: 1, callId, name, arguments: arguments_ })
     }
     if (!record.complete && (update.status === 'completed' || update.status === 'failed')) {
       record.complete = true; const content = [{ type: 'text', text: JSON.stringify(update.content ?? update.rawOutput ?? '') }]
       this.session.append('tool/result', { turn: this.lastTurn, step: 1,
-        message: createToolResultMessage({ callId, content, isError: update.status === 'failed' }) })
+        message: createToolResultMessage({ callId, content, isError: update.status === 'failed' }) }, { surfaceOp: 'append' })
     }
   }
 }
