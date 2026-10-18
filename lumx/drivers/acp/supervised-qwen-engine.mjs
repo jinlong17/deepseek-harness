@@ -108,7 +108,9 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
       if (guardianResult.code !== 0 || guardianResult.signal !== null) throw new Error('Qwen guardian failed to prove complete process-group cleanup')
       const qwenResult = await timeout(record.qwenExit, 'Qwen exit report', 1_000)
       return { exit: { code: qwenResult.code, signal: signalName(qwenResult.signal) }, guardianExit: guardianResult,
-        stderr: record.qwenDiagnostic(), guardianError: record.guardianDiagnostic(), permissions: record.permissions, updates: record.updates }
+        cleanup: Object.freeze({ guardian: Object.freeze({ pid: record.guardian.pid, exit: guardianResult }),
+          qwen: Object.freeze({ pid: record.qwenPid, pgid: record.qwenPid, exit: { code: qwenResult.code, signal: signalName(qwenResult.signal) } }),
+          processGroupReaped: true }), stderr: record.qwenDiagnostic(), guardianError: record.guardianDiagnostic(), permissions: record.permissions, updates: record.updates }
     })())
   }
 
@@ -286,6 +288,7 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
       const results = await Promise.allSettled([...handles.values()].map(record => dispose({ handleId: record.handleId })))
       await relay.dispose(); const failures = results.filter(result => result.status === 'rejected')
       if (failures.length > 0) throw new AggregateError(failures.map(result => result.reason), 'Qwen engine teardown failed')
+      return Object.freeze({ handles: Object.freeze(results.map(result => result.value.cleanup)) })
     })())
   }
 

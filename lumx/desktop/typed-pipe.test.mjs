@@ -68,3 +68,15 @@ test('close aborts a blocked writer and EOF has an awaitable clean lifecycle', a
   await clean.closed
   assert.deepEqual(seen, [1])
 })
+
+test('send waits for writable completion before resolving a shutdown response', async t => {
+  const input = new PassThrough(); let complete
+  const output = new Writable({ write(_chunk, _encoding, callback) { complete = callback } })
+  const pipe = createTypedPipe({ readable: input, writable: output, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor', generation: 'generation-123456', onFrame() {} })
+  let resolved = false
+  const sent = pipe.send({ channel: 'control', type: 'response', requestId: 'shutdown', payload: { ok: true } }).then(() => { resolved = true })
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(resolved, false)
+  complete(); await sent
+  input.end(); await pipe.closed
+  t.after(() => output.destroy())
+})

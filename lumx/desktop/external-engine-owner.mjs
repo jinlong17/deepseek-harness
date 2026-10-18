@@ -46,12 +46,18 @@ export async function prepareExternalEngineOwner(input) {
       prompt: engine.prompt,
     }),
     close: () => (closing ??= (async () => {
-      const failures = []
-      try { await engine.close() } catch (error) { failures.push(error) }
+      const failures = []; let cleanup
+      try { cleanup = await engine.close() } catch (error) { failures.push(error) }
       try { releaseQwenLaunch(materials) } catch (error) { failures.push(error) }
       try { stateLease.release() } catch (error) { failures.push(error) }
       if (failures.length === 1) throw failures[0]
       if (failures.length > 1) throw new AggregateError(failures, 'external engine owner teardown failed')
+      const groups = cleanup?.handles?.flatMap(handle => [
+        Object.freeze({ owner: 'guardian', pid: handle.guardian.pid, pgid: null, exit: handle.guardian.exit, result: 'exited' }),
+        Object.freeze({ owner: 'qwen', pid: handle.qwen.pid, pgid: handle.qwen.pgid, exit: handle.qwen.exit, result: handle.processGroupReaped ? 'reaped' : 'unproven' }),
+      ])
+      if (!Array.isArray(groups) || groups.some(row => row.owner === 'qwen' && row.result !== 'reaped')) throw new Error('external owner cleanup result is incomplete')
+      return Object.freeze({ schema: 'g9-b5-external-owner-cleanup/v1', groups: Object.freeze(groups), shutdownSucceeded: true })
     })()),
   })
 }

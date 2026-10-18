@@ -1,5 +1,3 @@
-import { once } from 'node:events'
-
 const VERSION = 1
 const MAX_FRAME_BYTES = 1024 * 1024
 const MAX_QUEUE_BYTES = 4 * MAX_FRAME_BYTES
@@ -134,8 +132,17 @@ export function createTypedPipe({ readable, writable, incomingDirection, outgoin
         const value = { ...item.value, seq: ++outgoingSeq }
         const encoded = `${JSON.stringify(value)}\n`
         try {
-          if (!writable.write(encoded)) await once(writable, 'drain', {
-            signal: AbortSignal.any([writeAbort.signal, AbortSignal.timeout(WRITE_DEADLINE_MS)]),
+          await new Promise((resolveWrite, rejectWrite) => {
+            let settledWrite = false
+            const finish = error => {
+              if (settledWrite) return
+              settledWrite = true; clearTimeout(timer); writable.removeListener('error', onError)
+              if (error === undefined) resolveWrite(); else rejectWrite(error)
+            }
+            const onError = error => finish(error)
+            const timer = setTimeout(() => finish(new Error('LUMX typed pipe write completion timed out')), WRITE_DEADLINE_MS)
+            writable.once('error', onError)
+            try { writable.write(encoded, finish) } catch (error) { finish(error) }
           })
           item.result.resolve()
         } catch (error) {
@@ -172,7 +179,20 @@ export function createTypedPipe({ readable, writable, incomingDirection, outgoin
     closing = true; ended = true; readable.pause()
     writeAbort.abort(new Error('LUMX typed pipe closed'))
     rejectAll(urgent, new Error('LUMX typed pipe closed')); rejectAll(ordinary, new Error('LUMX typed pipe closed'))
-    if (!writing) writable.end()
+    if (!writing && !writable.writableEnded) {
+      await new Promise((resolveEnd, rejectEnd) => {
+        let settledEnd = false
+        const finish = error => {
+          if (settledEnd) return
+          settledEnd = true; clearTimeout(timer); writable.removeListener('error', onError)
+          if (error === undefined) resolveEnd(); else rejectEnd(error)
+        }
+        const onError = error => finish(error)
+        const timer = setTimeout(() => finish(new Error('LUMX typed pipe close completion timed out')), WRITE_DEADLINE_MS)
+        writable.once('error', onError)
+        try { writable.end(finish) } catch (error) { finish(error) }
+      })
+    }
     maybeClosed()
     return lifecycle.promise
   }

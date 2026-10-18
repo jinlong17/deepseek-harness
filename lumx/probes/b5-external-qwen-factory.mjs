@@ -32,7 +32,7 @@ async function createPhase(host, runtimeAnchorSha256, qualification) {
   const value = { schema: 'g9-b5-external-continuity/v1', runtimeAnchorSha256, sessionId: six.created.sessionId, nativeSessionId: bound.nativeSessionId,
     controlSessionId: six.ui.sessionId, history: history(events), create: { first: six.first, streamedBeforeFinal: six.streamedBeforeFinal, cancelResult: six.cancelResult,
       otherResult: six.otherResult, toolResult: six.toolResult, ui: six.ui, permission, effects: facts, providerRequests: provider.requests.length,
-      toolCalls: toolEvents.filter(row => row.type === 'tool/call').length, toolResults: toolEvents.filter(row => row.type === 'tool/result').length }, exit }
+      cancelCloses: provider.cancelCloses(), toolCalls: toolEvents.filter(row => row.type === 'tool/call').length, toolResults: toolEvents.filter(row => row.type === 'tool/result').length }, exit }
   writeFileSync(config.continuityOutput, `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
   writeResult(config, { runtimeAnchorSha256, qualification, observations: value, counted_results: [] })
 }
@@ -42,7 +42,7 @@ async function resumePhase(host, runtimeAnchorSha256, qualification) {
   const reopened = await client.connection.prompt({ sessionId: prior.sessionId, prompt: [{ type: 'text', text: 'B5 REOPEN' }] })
   const ui = await browserResume(config, host, prior); const exit = await host.shutdown(); const events = await readEvents(persistenceRoot(), prior.sessionId); const bound = binding(events); const after = history(events)
   const c = prior.create; const control = [check('official-ui-control-session-created', c.ui.created && c.ui.apiRequests.includes('/api/session/create'), c.ui),
-    check('official-ui-cancel-reached-host', c.ui.cancelled && provider.cancelCloses() >= 1, { ui: c.ui, cancelCloses: provider.cancelCloses() }),
+    check('official-ui-cancel-reached-host', c.ui.cancelled && Number.isInteger(c.cancelCloses) && c.cancelCloses >= 1, { ui: c.ui, createCancelCloses: c.cancelCloses }),
     check('official-ui-control-session-restarted', ui.control.rendered && ui.control.selected, ui.control), check('browser-page-errors-empty', c.ui.pageErrors.length === 0 && ui.errors.length === 0, { create: c.ui.pageErrors, resume: ui.errors })]
   const durable = [check('durable-session-controller-restart', after.contiguous && after.count > prior.history.count, { before: prior.history, after }),
     check('durable-initial-ui-diagnostic', c.ui.durableInitial.rendered && c.ui.durableInitial.selected, c.ui.durableInitial),

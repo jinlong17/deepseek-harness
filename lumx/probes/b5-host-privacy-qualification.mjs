@@ -13,18 +13,20 @@ function snapshot(ctx) {
   })
 }
 export function capturePrivacyShutdownRows(ctx) {
-  const entries = [...ctx.loader.entries()]
-  return PRIVACY_IDS.map(id => {
+  const loader = ctx.loader; const entries = [...loader.entries()]
+  const rows = PRIVACY_IDS.map(id => {
     const entry = entries.find(candidate => candidate.options.id === id)
     const resolution = entry === undefined ? undefined : entry.loader.resolveEntry(entry.options.name, entry.parent.tree.ctx.baseUrl)
     return entry === undefined ? { id, entry: undefined, before: { resolved: false } } : { id, entry,
       before: { resolved: true, disabled: entry.disabled, fiberPresent: entry.fiber !== undefined, fiberState: entry.fiber?.state ?? null,
         name: entry.options.name, identity: resolution } }
   })
+  return Object.freeze({ loader, rows: Object.freeze(rows) })
 }
-export function observePrivacyShutdownRows(ctx, captured) {
-  const current = [...ctx.loader.entries()]
-  return captured.map(row => {
+export function observePrivacyShutdownRows(captured) {
+  if (captured?.loader === undefined || !Array.isArray(captured.rows)) throw new Error('privacy shutdown capture is invalid')
+  const current = [...captured.loader.entries()]
+  return captured.rows.map(row => {
     const entry = current.find(candidate => candidate.options.id === row.id)
     const selected = row.entry
     return { id: row.id, before: row.before, sameEntryAfterShutdown: entry === selected,

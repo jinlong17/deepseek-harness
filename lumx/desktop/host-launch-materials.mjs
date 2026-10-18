@@ -132,8 +132,11 @@ export async function prepareLumxHostLaunch(input) {
     let consumed = false; let cleaned = false
     const materials = { anchors, dataHome, externalOwner, forkRoot, h1, input, nodePath, paths, payload, port, profile, relay, sourceRoot,
       async releaseReservation() { if (consumed) throw new Error('Host launch material was already consumed'); consumed = true; await releasePort() },
-      cleanup: async () => { if (cleaned) return; cleaned = true; await releasePort().catch(() => {}); await relay?.dispose().catch(() => {}); await externalOwner?.close().catch(() => {});
-        try { chmodSync(frozen, 0o700) } catch {}; rmSync(runtime, { recursive: true, force: true }) } }
+      cleanup: async () => { if (cleaned) return undefined; cleaned = true; let externalCleanup
+        await releasePort().catch(() => {}); await relay?.dispose().catch(() => {})
+        try { externalCleanup = await externalOwner?.close() } catch {}
+        try { chmodSync(frozen, 0o700) } catch {}; rmSync(runtime, { recursive: true, force: true })
+        return externalCleanup === undefined ? undefined : Object.freeze({ externalCleanup }) } }
     return Object.freeze(materials)
   } catch (error) {
     await releasePort().catch(() => {}); await relay?.dispose().catch(() => {}); await externalOwner?.close().catch(() => {})

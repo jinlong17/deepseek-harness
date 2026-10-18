@@ -67,11 +67,11 @@ export async function launchLumxHost(prepared) {
     }
     let stopping
     const stop = command => (stopping ??= (async () => {
-      let control; let controlError
+      let control; let controlError; let outcome; let cleanup
       try {
         if (command !== undefined) try { control = await bridge.request({ command }, 'Host shutdown') } catch (error) { controlError = error }
         else await bridge.close().catch(() => {})
-        let outcome = await Promise.race([exited, new Promise(resolveWait => setTimeout(() => resolveWait(undefined), 10_000))])
+        outcome = await Promise.race([exited, new Promise(resolveWait => setTimeout(() => resolveWait(undefined), 10_000))])
         if (outcome === undefined) {
           try { process.kill(-child.pid, 'SIGTERM') } catch {}
           outcome = await Promise.race([exited, new Promise(resolveWait => setTimeout(() => resolveWait(undefined), 2_000))])
@@ -80,12 +80,12 @@ export async function launchLumxHost(prepared) {
           try { process.kill(-child.pid, 'SIGKILL') } catch {}
           outcome = await withTimeout(exited, 2_000, 'Host reap after SIGKILL')
         }
-        if (controlError !== undefined) throw new AggregateError([controlError], 'Host shutdown control failed after process cleanup')
-        return { ...outcome, control }
       } finally {
         await bridge?.close().catch(() => {})
-        await materials.cleanup()
+        cleanup = await materials.cleanup()
       }
+      if (controlError !== undefined) throw new AggregateError([controlError], 'Host shutdown control failed after process cleanup')
+      return { ...outcome, control, ...(cleanup === undefined ? {} : { ownerCleanup: cleanup.externalCleanup }) }
     })())
     const shutdown = () => stop('shutdown')
     const disconnect = () => stop(undefined)

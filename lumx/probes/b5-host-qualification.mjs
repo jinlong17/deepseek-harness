@@ -57,7 +57,7 @@ export function installGate1HostQualification(runtime, input) {
   function closeAfterRuntime() {
     if (!closing) throw new Error('Host qualification closing snapshot requires a closed dispatcher')
     if (privacyShutdownRows === undefined) return undefined
-    const privacy = observePrivacyShutdownRows(runtime.ctx, privacyShutdownRows)
+    const privacy = observePrivacyShutdownRows(privacyShutdownRows)
     const raw = JSON.stringify(privacy); if (Buffer.byteLength(raw) > 64 * 1024) throw new Error('Host closing facts exceed bound')
     return Object.freeze({ privacy })
   }
