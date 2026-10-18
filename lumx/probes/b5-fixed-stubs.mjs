@@ -20,11 +20,16 @@ function tool(response, payload, id, command) {
 export async function desktopStub() {
   const requests = []
   const server = await listen(async (request, response) => {
+    if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
+      response.writeHead(request.method === 'POST' ? 404 : 405, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ error: 'fixed desktop provider route requires POST /v1/chat/completions' }))
+      return
+    }
     const payload = await body(request); requests.push({ method: request.method, path: request.url, payload })
     const prompt = JSON.stringify(payload.messages); const text = `LUMX synthetic response: ${prompt.slice(-256)}`
     response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ text }))
   })
-  return Object.freeze({ endpoint: `http://127.0.0.1:${server.port}/model`, requests, close: server.close })
+  return Object.freeze({ endpoint: `http://127.0.0.1:${server.port}/v1/chat/completions`, requests, close: server.close })
 }
 export async function h1Stubs(nativeCanaryPath, listenFn = listen) {
   const wire = { broker: [], model: [] }; let brokerOrdinal = 0; let nativeOrdinal = 0; let retryOrdinal = 0; let model

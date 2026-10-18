@@ -10,7 +10,7 @@ import { after, test } from 'node:test'
 import { spawn } from 'node:child_process'
 
 import { closeB5HostOwners, withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
-import { h1Stubs, qwenStub } from './b5-fixed-stubs.mjs'
+import { desktopStub, h1Stubs, qwenStub } from './b5-fixed-stubs.mjs'
 import { listen, qualificationFacts } from './b5-hook-common.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -106,10 +106,42 @@ process.stdout.write(JSON.stringify({ endpoints, sameClose: firstClose === secon
   assert.equal(value.sameClose, true)
   for (const endpoint of value.endpoints) await closed(Number(new URL(endpoint).port))
   if (stream === 'finish') assert.match(value.stream, /_FINAL/u)
+  return value
 }
 
+test('desktop stub accepts only the fixed POST provider route', async () => {
+  const stub = await desktopStub(); const endpoint = new URL(stub.endpoint)
+  try {
+    assert.equal(endpoint.hostname, '127.0.0.1')
+    assert.equal(endpoint.pathname, '/v1/chat/completions')
+    assert.equal(endpoint.search, '')
+    const accepted = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content: 'fixture' }] }) })
+    assert.equal(accepted.status, 200)
+    assert.match((await accepted.json()).text, /^LUMX synthetic response:/u)
+    assert.equal(stub.requests.length, 1)
+    assert.deepEqual(stub.requests[0], { method: 'POST', path: '/v1/chat/completions', payload: { messages: [{ role: 'user', content: 'fixture' }] } })
+    for (const value of [
+      { url: new URL('/model', endpoint), method: 'POST' },
+      { url: new URL(`${endpoint.pathname}?probe=1`, endpoint), method: 'POST' },
+      { url: endpoint, method: 'GET' },
+    ]) {
+      const rejected = await fetch(value.url, { method: value.method })
+      assert.equal(rejected.ok, false)
+      assert.equal(stub.requests.length, 1)
+    }
+  } finally {
+    await stub.close(); await closed(Number(endpoint.port))
+  }
+})
+
 test('each B5 factory closes prepared loopback resources idempotently before Host launch', async () => {
-  await factoryCleanup('desktop', 'b5-desktop-host-factory.mjs', 'desktop-main', 'desktop-byok')
+  for (const scenario of ['desktop-main', 'desktop-alternate-anonymous', 'desktop-alternate-valid']) {
+    const value = await factoryCleanup(`desktop-${scenario}`, 'b5-desktop-host-factory.mjs', scenario, 'desktop-byok')
+    const endpoint = new URL(value.endpoints[0])
+    assert.equal(endpoint.hostname, '127.0.0.1')
+    assert.equal(endpoint.pathname, '/v1/chat/completions')
+    assert.equal(endpoint.search, '')
+  }
   await factoryCleanup('h1', 'b5-h1-host-factory.mjs', 'h1-valid', 'governed-h1')
   await factoryCleanup('external-stream', 'b5-external-qwen-factory.mjs', 'external-create', 'external-qwen', 'finish')
   await factoryCleanup('external-abort', 'b5-external-qwen-factory.mjs', 'external-create', 'external-qwen', 'abort')
