@@ -64,7 +64,7 @@ function read(stream, timeoutMs) {
   })
 }
 function verifyAck(ack, ready) {
-  if (ack?.schema !== 'g9-b5-host-ack/v1' || !same(ack.nonce ?? '', ready.nonce) || !same(ack.source_anchor_sha256 ?? '', ready.source_anchor_sha256)) throw new Error('ACK identity mismatch')
+  if (ack?.schema !== 'g9-b5-host-ack/v1' || !same(ack.nonce ?? '', ready.nonce) || !same(ack.source_anchor_sha256 ?? '', ready.source_anchor_sha256) || !same(ack.preparation_anchor_sha256 ?? '', ready.preparation_anchor_sha256)) throw new Error('ACK identity mismatch')
   hex(ack.runtime_anchor_sha256, 'runtime anchor')
   const wanted = Object.fromEntries(ready.materials.map(value => [value.material_id, value.sha256]))
   if (canonical(ack.material_sha256) !== canonical(wanted)) throw new Error('ACK material hash mismatch')
