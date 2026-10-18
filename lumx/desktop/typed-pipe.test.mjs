@@ -58,8 +58,8 @@ test('close aborts a blocked writer and EOF has an awaitable clean lifecycle', a
   const blocked = new Writable({ highWaterMark: 1, write(_chunk, _encoding, _callback) {} })
   const pipe = createTypedPipe({ readable: input, writable: blocked, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor', generation: 'generation-123456', onFrame() {} })
   const pending = pipe.send({ channel: 'engine', type: 'request', requestId: 'r1', payload: {} }).catch(error => error)
-  await assert.rejects(pipe.close(), /aborted|typed pipe closed/i)
-  assert.match((await pending).message, /aborted|typed pipe closed/i)
+  await assert.rejects(pipe.close(), /timed out|typed pipe closed/i)
+  assert.match((await pending).message, /timed out|typed pipe closed/i)
 
   const cleanInput = new PassThrough(); const cleanOutput = new PassThrough()
   const seen = []

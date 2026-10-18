@@ -67,14 +67,19 @@ export function createTypedPipe({ readable, writable, incomingDirection, outgoin
   lifecycle.promise.catch(() => {})
   function rejectAll(queue, error) { for (const item of queue.splice(0)) item.result.reject(error) }
   function maybeClosed() {
-    if (settled || failure !== undefined || !ended || incomingActive || incoming.length > 0 || writing || urgent.length > 0 || ordinary.length > 0 || !writable.writableFinished) return
+    if (settled || failure !== undefined || !ended || incomingActive || incoming.length > 0 || writing || urgent.length > 0 || ordinary.length > 0) return
+    if (!writable.writableFinished) {
+      void finishWritable().then(maybeClosed, settleFailure)
+      return
+    }
     settled = true; lifecycle.resolve()
   }
 
   function finishWritable() {
     if (finishOutput !== undefined) return finishOutput
     finishOutput = new Promise((resolveEnd, rejectEnd) => {
-      if (writable.writableFinished || writable.destroyed) { resolveEnd(); return }
+      if (writable.writableFinished) { resolveEnd(); return }
+      if (writable.destroyed) { rejectEnd(new Error('LUMX typed pipe output was destroyed before finish')); return }
       let settledEnd = false
       const finish = error => {
         if (settledEnd) return
