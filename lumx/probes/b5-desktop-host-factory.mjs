@@ -3,15 +3,12 @@ import { createHash, randomUUID } from 'node:crypto'
 import { authenticate, baseLaunch, check, freePort, loadConfig, qualificationFacts, rawRequest, unit, writeResult } from './b5-hook-common.mjs'
 import { desktopStub } from './b5-fixed-stubs.mjs'
 import { withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
+import { privacyLifecycleComplete, privacyOriginalRowsInert } from './b5-host-privacy-qualification.mjs'
 
 const config = loadConfig(); let model; let closePromise; let identity; let gatewayState = { active: true }
 const digest = value => createHash('sha256').update(value).digest('hex')
 const valid = () => ({ credential: 'synthetic-b5-credential', expiresAt: '2099-01-01T00:00:00.000Z', subject: 'synthetic-b5-user', type: 'lumx.local-auth.v1' })
 function fact(name, value) { return { name, ...value } }
-function coversExactly(rows, ids, predicate, identity = row => row.id) {
-  return Array.isArray(rows) && rows.length === ids.length && new Set(rows.map(identity)).size === ids.length
-    && ids.every(id => predicate(rows.find(row => identity(row) === id), id))
-}
 async function attempt(host, id, configure) {
   identity = valid(); gatewayState = { active: true }; configure?.()
   const before = model.requests.length; const response = await host.control.healthCheck()
@@ -70,20 +67,12 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
       check('wrong-origin-rejected', wrongOrigin.status === 403, wrongOrigin), check('wrong-host-rejected', wrongHost.status === 403, wrongHost), check('missing-origin-observed', Number.isSafeInteger(missingOrigin.status), missingOrigin)]
     const positiveChecks = [check('byok-positive-model-response', byName.positive.modelRequests === 1 && passed(byName.positive.response), byName.positive),
       ...[['anonymous','byok-anonymous-zero-model'],['wrongType','byok-wrong-type-zero-model'],['invalidExpiry','byok-invalid-expiry-zero-model'],['equalExpiry','byok-equal-expiry-zero-model'],['subjectMismatch','byok-subject-mismatch-zero-model'],['expired','byok-expired-zero-model'],['revoked','byok-revoked-zero-model']].map(([name,id]) => check(id, zero(name), byName[name]))]
-    const allRows = Array.isArray(privacyFacts.final) && privacyFacts.final.every(row => row.resolved && row.disabled === true && !row.fiberPresent)
+    const allRows = privacyOriginalRowsInert(privacyFacts)
+    const privacyLifecycle = privacyLifecycleComplete(privacyFacts)
     const shutdown = await host.shutdown(); const closingRows = shutdown.control?.qualificationShutdown?.privacy ?? []
     const shutdownRowsClosed = closingRows.length === 7 && closingRows.every(row => row.before.resolved && row.before.disabled === true
       && row.sameEntryAfterShutdown && row.postInventoryPresent && row.postDisabled === true && (!row.postFiberPresent || row.postFiberState === 4))
-    const protectedLifecycle = coversExactly(privacyFacts.protectedActions, privacyFacts.privacyIds, row => row?.kind === 'protected-original'
-      && row.executed && row.updateDisabled && row.removeRejected && row.retainedSameEntry && row.retainedSameOptions && row.retainedSameIdentity && row.retainedInactive)
-    const aliasLifecycle = coversExactly(privacyFacts.aliasActions, privacyFacts.privacyIds, (row, id) => row?.kind === 'qualification-child-alias'
-      && row.originalId === id && row.executed && row.createdSameIdentity && row.createdInactive && row.enableRejected && row.afterEnableInactive
-      && row.absentAfterRemove && row.reinstallSameIdentity && row.reinstallInactive, row => row.originalId)
-    const aliasesCleaned = privacyFacts.aliasCleanup?.groupAbsent === true
-      && coversExactly(privacyFacts.aliasCleanup.aliases, privacyFacts.privacyIds,
-        (row, id) => row?.id === `lumx-b5-privacy-alias-${id}` && row.absent === true,
-        row => row.id.startsWith('lumx-b5-privacy-alias-') ? row.id.slice('lumx-b5-privacy-alias-'.length) : row.id)
-    const cordisChecks = [check('privacy-seven-resolved-disabled-no-fiber', allRows, privacyFacts.final), check('privacy-safe-update-remove-reinstall', protectedLifecycle && aliasLifecycle && aliasesCleaned, { aliasActions: privacyFacts.aliasActions, aliasCleanup: privacyFacts.aliasCleanup, protectedActions: privacyFacts.protectedActions }),
+    const cordisChecks = [check('privacy-seven-resolved-disabled-no-fiber', allRows, privacyFacts.final), check('privacy-safe-update-remove-reinstall', privacyLifecycle, { aliasActions: privacyFacts.aliasActions, aliasCleanup: privacyFacts.aliasCleanup, protectedActions: privacyFacts.protectedActions }),
       check('privacy-late-reenable-rejected', privacyFacts.lateEnable.rejected === true, privacyFacts.lateEnable), check('privacy-renamed-absent-uncomposed-inventory', privacyFacts.candidates.every(row => privacyFacts.privacyIds.includes(row.id)), privacyFacts.candidates),
       check('privacy-shutdown-no-fiber', shutdownRowsClosed, closingRows), check('consumer-profile-privacy-consumer', host.consumer === 'desktop-byok', { consumer: host.consumer }), check('governed-desktop-h1-adapter-capability', privacyFacts.governedCandidates.length > 0, privacyFacts.governedCandidates)]
     writeResult(config, { runtimeAnchorSha256, qualification, parent_exports: { agentLoopPositive: { modelRequests: byName.positive.modelRequests,

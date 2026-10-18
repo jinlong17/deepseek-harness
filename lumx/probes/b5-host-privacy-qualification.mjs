@@ -4,43 +4,95 @@ const PRIVACY_IDS = Object.freeze([
 ])
 const LATE_ID = 'product-analytics'
 const ALIAS_PREFIX = 'lumx-b5-privacy-alias-'
+export const PRIVACY_ALIAS_GROUP_ID = `${ALIAS_PREFIX}group`
 function error(error) { return { code: error?.code, message: error instanceof Error ? error.message : String(error), name: error?.name ?? 'Error' } }
 function aliasId(id) { return `${ALIAS_PREFIX}${id}` }
 function entryFor(ctx, id) { return [...ctx.loader.entries()].find(candidate => candidate.options.id === id) }
-function resolveOrUndefined(loader, id) {
-  try { return loader.resolve(id) } catch { return undefined }
-}
-function identity(entry) {
-  const resolution = entry.loader.resolveEntry(entry.options.name, entry.parent.tree.ctx.baseUrl)
+function identityFromResolution(resolution) {
   return resolution === undefined ? undefined : { format: resolution.format, generation: resolution.generation, url: resolution.url }
 }
-function sameIdentity(left, right) { return JSON.stringify(left) === JSON.stringify(right) }
-function inactive(entry) { return entry?.disabled === true && entry.fiber === undefined }
+function realIdentity(value) {
+  return value !== undefined && typeof value.format === 'string' && value.format.length > 0
+    && Number.isInteger(value.generation) && value.generation >= 0 && typeof value.url === 'string' && value.url.length > 0
+}
+function sameIdentity(left, right) {
+  return realIdentity(left) && realIdentity(right)
+    && left.format === right.format && left.generation === right.generation && left.url === right.url
+}
+function rowState(entry) {
+  if (entry === undefined) return { present: false, resolved: false }
+  const resolution = entry.loader.resolveEntry(entry.options.name, entry.parent.tree.ctx.baseUrl)
+  return {
+    present: true, resolved: true, id: entry.options.id, package: entry.options.name, identity: identityFromResolution(resolution),
+    optionsFingerprint: JSON.stringify(entry.options), disabled: entry.disabled, fiberPresent: entry.fiber !== undefined,
+    fiberState: entry.fiber?.state ?? null, unevaluated: resolution !== undefined && entry.loader.loadedPlugin(resolution) === undefined,
+  }
+}
+function inactive(state) { return state?.present === true && state.disabled === true && state.fiberPresent === false && state.unevaluated === true }
 function requiredRemovalError(cause, id) {
   return cause instanceof Error && cause.message === `LUMX governance denied include:${id}: protected row cannot be removed`
 }
-function snapshot(ctx) {
-  const entries = [...ctx.loader.entries()]
-  return PRIVACY_IDS.map(id => {
-    const entry = entries.find(candidate => candidate.options.id === id)
-    return entry === undefined ? { id, resolved: false, disabled: null, fiberPresent: false, fiberState: null }
-      : { id, resolved: true, disabled: entry.disabled, fiberPresent: entry.fiber !== undefined, fiberState: entry.fiber?.state ?? null, name: entry.options.name }
+function expectedAliasEnableError(cause) {
+  return cause instanceof Error && /^LUMX governance denied .*protected row must remain disabled$/u.test(cause.message)
+}
+function exactCoverage(rows, ids, key = row => row.id) {
+  return Array.isArray(rows) && rows.length === ids.length && new Set(rows.map(key)).size === ids.length
+    && ids.every(id => rows.some(row => key(row) === id))
+}
+function sameOptions(before, after) {
+  return before?.optionsFingerprint !== undefined && before.optionsFingerprint === after?.optionsFingerprint
+}
+function originalActionComplete(row, id) {
+  const identity = row?.packageIdentity
+  return row?.id === id && row.kind === 'protected-original' && row.executed === true && typeof row.package === 'string'
+    && sameIdentity(identity, row.before?.identity) && inactive(row.before) && inactive(row.updated)
+    && row.removeRejected === true && row.removalError?.message === `LUMX governance denied include:${id}: protected row cannot be removed`
+    && row.retainedSameEntry === true && row.retainedSameOptions === true && sameOptions(row.before, row.retained)
+    && sameIdentity(identity, row.retained?.identity) && inactive(row.retained)
+}
+function aliasActionComplete(row, original) {
+  const id = aliasId(original.id); const identity = original.packageIdentity
+  const acceptableEnable = row?.enableOutcome === 'governance-error' || row?.enableOutcome === 'rejected-state'
+  return row?.id === id && row.kind === 'qualification-child-alias' && row.originalId === original.id && row.package === original.package
+    && row.executed === true && sameIdentity(identity, row.packageIdentity)
+    && sameIdentity(identity, row.created?.identity) && inactive(row.created)
+    && row.updatedSameEntry === true && sameOptions(row.created, row.updated) && sameIdentity(identity, row.updated?.identity) && inactive(row.updated)
+    && acceptableEnable && sameIdentity(identity, row.afterEnable?.identity) && inactive(row.afterEnable)
+    && row.absentInLoader === true && row.absentInGroupData === true
+    && sameIdentity(identity, row.reinstalled?.identity) && inactive(row.reinstalled)
+}
+export function privacyOriginalRowsInert(facts) {
+  if (!exactCoverage(facts?.privacyIds, PRIVACY_IDS, value => value)
+    || !exactCoverage(facts?.final, PRIVACY_IDS)) return false
+  const originals = new Map((facts.protectedActions ?? []).map(row => [row.id, row]))
+  return exactCoverage(facts?.protectedActions, PRIVACY_IDS) && PRIVACY_IDS.every(id => {
+    const original = originals.get(id)
+    return originalActionComplete(original, id) && sameIdentity(original.packageIdentity, facts.final.find(row => row.id === id)?.identity)
+      && inactive(facts.final.find(row => row.id === id))
   })
 }
+export function privacyLifecycleComplete(facts) {
+  if (!privacyOriginalRowsInert(facts)) return false
+  const originals = new Map(facts.protectedActions.map(row => [row.id, row]))
+  if (!exactCoverage(facts.aliasActions, PRIVACY_IDS, row => row.originalId)) return false
+  if (!facts.aliasActions.every(row => aliasActionComplete(row, originals.get(row.originalId)))) return false
+  if (facts.aliasCleanup?.groupId !== PRIVACY_ALIAS_GROUP_ID || facts.aliasCleanup.groupAbsent !== true) return false
+  return exactCoverage(facts.aliasCleanup.aliases, PRIVACY_IDS, row => row.originalId)
+    && facts.aliasCleanup.aliases.every(row => row.id === aliasId(row.originalId) && row.absent === true)
+}
+function snapshot(ctx) { return PRIVACY_IDS.map(id => rowState(entryFor(ctx, id))) }
 async function protectedRowAction(ctx, id) {
   const entry = entryFor(ctx, id)
   if (entry === undefined) return { id, kind: 'protected-original', executed: false, reason: 'unresolved' }
-  const options = entry.options; const packageIdentity = identity(entry); const parent = entry.parent
+  const before = rowState(entry); const packageIdentity = before.identity; const parent = entry.parent
   await entry.update({ disabled: true }, false, true); await ctx.loader.await()
-  const updated = entryFor(ctx, id)
+  const updated = rowState(entryFor(ctx, id))
   let removalError; let removeRejected = false
   try { parent.remove(id); await ctx.loader.await() } catch (cause) { removeRejected = requiredRemovalError(cause, id); removalError = error(cause); await ctx.loader.await() }
-  const retained = entryFor(ctx, id)
+  const retainedEntry = entryFor(ctx, id); const retained = rowState(retainedEntry)
   return {
-    id, kind: 'protected-original', executed: true, package: options.name, packageIdentity,
-    updateDisabled: inactive(updated), removeRejected, removalError,
-    retainedSameEntry: retained === entry, retainedSameOptions: retained?.options === options,
-    retainedSameIdentity: sameIdentity(identity(retained), packageIdentity), retainedInactive: inactive(retained),
+    id, kind: 'protected-original', executed: true, package: before.package, packageIdentity, before, updated, removalError, removeRejected,
+    retained, retainedSameEntry: retainedEntry === entry, retainedSameOptions: retainedEntry?.options === entry.options,
   }
 }
 async function removeQualificationGroup(ctx, groupId, aliases) {
@@ -53,7 +105,7 @@ async function removeQualificationGroup(ctx, groupId, aliases) {
     } catch (cause) { failures.push(cause) }
   }
   try {
-    if (resolveOrUndefined(ctx.loader, groupId) !== undefined) ctx.loader.remove(groupId)
+    if (entryFor(ctx, groupId) !== undefined) ctx.loader.remove(groupId)
     await ctx.loader.await()
   } catch (cause) { failures.push(cause) }
   if (failures.length === 1) throw failures[0]
@@ -61,41 +113,48 @@ async function removeQualificationGroup(ctx, groupId, aliases) {
 }
 async function childAliasActions(ctx, protectedActions) {
   const aliases = protectedActions.map(row => aliasId(row.id))
-  if (new Set(aliases).size !== PRIVACY_IDS.length || aliases.some(id => entryFor(ctx, id) !== undefined)) {
-    throw new Error('privacy qualification alias collision')
-  }
-  const groupId = await ctx.loader.create({ name: 'cordis:group', group: true, config: [] })
-  await ctx.loader.await()
-  const group = ctx.loader.resolve(groupId)?.subgroup
-  if (group === undefined) throw new Error('privacy qualification group is unavailable')
-  let primary
+  if (new Set(aliases).size !== PRIVACY_IDS.length || entryFor(ctx, PRIVACY_ALIAS_GROUP_ID) !== undefined
+    || aliases.some(id => entryFor(ctx, id) !== undefined)) throw new Error('privacy qualification alias collision')
+  let groupId; let primary
   try {
+    groupId = await ctx.loader.create({ id: PRIVACY_ALIAS_GROUP_ID, name: 'cordis:group', group: true, config: [] })
+    await ctx.loader.await()
+    if (groupId !== PRIVACY_ALIAS_GROUP_ID) throw new Error('privacy qualification group identity mismatch')
+    const group = ctx.loader.resolve(groupId)?.subgroup
+    if (group === undefined) throw new Error('privacy qualification group is unavailable')
     const actions = []
     for (const protectedRow of protectedActions) {
-      if (!protectedRow.executed) throw new Error(`privacy qualification protected row unavailable: ${protectedRow.id}`)
+      if (!originalActionComplete(protectedRow, protectedRow.id)) throw new Error(`privacy qualification protected row unavailable: ${protectedRow.id}`)
       const id = aliasId(protectedRow.id)
       await group.update([{ id, name: protectedRow.package, disabled: true }]); await ctx.loader.await()
-      const created = entryFor(ctx, id); const createdIdentity = identity(created)
-      let enableError; let enableRejected = false
-      try { await group.update([{ ...created?.options, disabled: false }]); await ctx.loader.await() } catch (cause) { enableRejected = true; enableError = error(cause); await ctx.loader.await() }
-      const afterEnable = entryFor(ctx, id)
-      if (!enableRejected) enableRejected = afterEnable?.options === created?.options && inactive(afterEnable)
+      const createdEntry = entryFor(ctx, id)
+      if (createdEntry === undefined) throw new Error(`privacy qualification alias was not created: ${id}`)
+      const created = rowState(createdEntry)
+      await group.update([{ ...createdEntry.options, disabled: true }]); await ctx.loader.await()
+      const updatedEntry = entryFor(ctx, id); const updated = rowState(updatedEntry)
+      let enableError; let enableOutcome = 'rejected-state'
+      try { await group.update([{ ...updatedEntry?.options, disabled: false }]); await ctx.loader.await() } catch (cause) {
+        enableError = error(cause); enableOutcome = expectedAliasEnableError(cause) ? 'governance-error' : 'unexpected-error'; await ctx.loader.await()
+      }
+      const afterEnable = rowState(entryFor(ctx, id))
+      if (enableOutcome === 'rejected-state' && !inactive(afterEnable)) enableOutcome = 'unexpected-success'
       group.remove(id); await ctx.loader.await()
-      const absentAfterRemove = entryFor(ctx, id) === undefined && !group.data.some(row => row.id === id)
+      const absentInLoader = entryFor(ctx, id) === undefined; const absentInGroupData = !group.data.some(row => row.id === id)
       await group.update([{ id, name: protectedRow.package, disabled: true }]); await ctx.loader.await()
-      const reinstalled = entryFor(ctx, id)
+      const reinstalled = rowState(entryFor(ctx, id))
       actions.push({
-        id, kind: 'qualification-child-alias', originalId: protectedRow.id, package: protectedRow.package,
-        packageIdentity: protectedRow.packageIdentity, executed: true, createdSameIdentity: sameIdentity(createdIdentity, protectedRow.packageIdentity),
-        createdInactive: inactive(created), enableRejected, enableError, afterEnableInactive: inactive(afterEnable),
-        absentAfterRemove, reinstallSameIdentity: sameIdentity(identity(reinstalled), protectedRow.packageIdentity), reinstallInactive: inactive(reinstalled),
+        id, kind: 'qualification-child-alias', originalId: protectedRow.id, package: protectedRow.package, packageIdentity: protectedRow.packageIdentity,
+        executed: true, created, updated, updatedSameEntry: updatedEntry === createdEntry, enableError, enableOutcome, afterEnable,
+        absentInLoader, absentInGroupData, reinstalled,
       })
     }
     return { actions, groupId }
   } catch (cause) { primary = cause; throw cause } finally {
-    try { await removeQualificationGroup(ctx, groupId, aliases) } catch (cleanup) {
-      if (primary === undefined) throw cleanup
-      throw new AggregateError([primary, cleanup], 'privacy qualification lifecycle and cleanup failed')
+    if (groupId !== undefined) {
+      try { await removeQualificationGroup(ctx, groupId, aliases) } catch (cleanup) {
+        if (primary === undefined) throw cleanup
+        throw new AggregateError([primary, cleanup], 'privacy qualification lifecycle and cleanup failed')
+      }
     }
   }
 }
@@ -128,8 +187,8 @@ export async function qualifyPrivacyLifecycle(ctx) {
   for (const id of PRIVACY_IDS) protectedActions.push(await protectedRowAction(ctx, id))
   const aliasLifecycle = await childAliasActions(ctx, protectedActions)
   const aliasActions = aliasLifecycle.actions
-  const aliasCleanup = Object.freeze({ groupAbsent: resolveOrUndefined(ctx.loader, aliasLifecycle.groupId) === undefined,
-    aliases: aliasActions.map(row => ({ id: row.id, absent: entryFor(ctx, row.id) === undefined })) })
+  const aliasCleanup = Object.freeze({ groupId: aliasLifecycle.groupId, groupAbsent: entryFor(ctx, aliasLifecycle.groupId) === undefined,
+    aliases: aliasActions.map(row => ({ id: row.id, originalId: row.originalId, absent: entryFor(ctx, row.id) === undefined })) })
   const late = [...ctx.loader.entries()].find(candidate => candidate.options.id === LATE_ID)
   let lateEnable
   if (late === undefined) lateEnable = { id: LATE_ID, executed: false, reason: 'unresolved' }
