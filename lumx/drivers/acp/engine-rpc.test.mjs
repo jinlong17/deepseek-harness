@@ -53,7 +53,7 @@ test('a blocked prompt does not block permission roundtrip or cancellation', asy
   )])
   await p.host.cancel('handle-1', 'prompt-1')
   await assert.rejects(pending, /cancelled/)
-  assert.deepEqual(p.host.stats(), { completed: 1, controls: 0, events: 0, incoming: 0, outgoing: 0 })
+  assert.deepEqual(p.host.stats(), { abandoned: 0, completed: 1, controls: 0, events: 0, incoming: 0, outgoing: 0 })
 })
 
 test('rejects unknown responses and bounds operation names', async t => {
@@ -97,10 +97,12 @@ test('an already aborted request is rejected before any frame is sent', async ()
   await peer.close()
 })
 
-test('aborting create sends remote disposal and settles the blocked handler', async t => {
-  const started = deferred(); let disposed = 0
+test('aborting create consumes its late completion and leaves another handle usable', async t => {
+  const started = deferred(); let disposed = 0; let creates = 0
   const p = peers({ host: {}, supervisor: {
     create: async (_input, context) => {
+      creates += 1
+      if (creates > 1) return { nativeSessionId: 'native-2' }
       started.resolve()
       await new Promise((resolve, reject) => context.signal.addEventListener('abort', () => reject(context.signal.reason), { once: true }))
     },
@@ -112,8 +114,9 @@ test('aborting create sends remote disposal and settles the blocked handler', as
   await started.promise
   controller.abort(new Error('caller aborted create'))
   await assert.rejects(pending, /caller aborted create/)
-  await until(() => disposed === 1 && p.supervisor.stats().incoming === 0)
+  await until(() => disposed === 1 && p.supervisor.stats().incoming === 0 && p.host.stats().abandoned === 0)
   assert.equal(disposed, 1)
+  assert.deepEqual(await p.host.request('create', {}, { handleId: 'handle-next' }), { nativeSessionId: 'native-2' })
 })
 
 test('close is bounded for a handler that ignores abort and rejects late frames', async () => {

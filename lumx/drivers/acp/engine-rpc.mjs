@@ -38,7 +38,7 @@ function timeout(promise, ms, label) {
 
 /** Correlated, bounded engine RPC over one validated typed pipe. */
 export function createEngineRpcPeer({ pipe, handlers = {}, onEvent = () => {} }) {
-  const outgoing = new Map(); const incoming = new Map(); const completed = new Set()
+  const outgoing = new Map(); const abandoned = new Map(); const incoming = new Map(); const completed = new Set()
   const controls = new Set()
   let accepting = true; let incomingTotal = 0; let eventCount = 0; let eventTail = Promise.resolve()
 
@@ -50,14 +50,14 @@ export function createEngineRpcPeer({ pipe, handlers = {}, onEvent = () => {} })
       body = record(input, 'engine request input'); handleId = optionalId(options.handleId, 'handleId'); promptId = optionalId(options.promptId, 'promptId')
       options.signal?.throwIfAborted()
     } catch (error) { return Promise.reject(error) }
-    if (outgoing.size >= MAX_PENDING) return Promise.reject(new Error('engine RPC outgoing limit reached'))
+    if (outgoing.size >= MAX_PENDING || abandoned.size >= MAX_COMPLETED) return Promise.reject(new Error('engine RPC outgoing limit reached'))
     const requestId = randomUUID(); const result = Promise.withResolvers()
     const cancelRemote = () => {
       if (promptId !== undefined && handleId !== undefined) void pipe.send({ channel: 'engine', type: 'cancel', handleId, promptId }, { priority: true }).catch(() => {})
       else if (handleId !== undefined) void pipe.send({ channel: 'engine', type: 'dispose', handleId }, { priority: true }).catch(() => {})
     }
-    const abort = () => { cancelRemote(); settleOutgoing(requestId, options.signal?.reason ?? new Error(`engine ${operation} request cancelled`)) }
-    const expire = () => { cancelRemote(); settleOutgoing(requestId, new Error(`engine ${operation} request timed out`)) }
+    const abort = () => { cancelRemote(); settleOutgoing(requestId, options.signal?.reason ?? new Error(`engine ${operation} request cancelled`), undefined, true) }
+    const expire = () => { cancelRemote(); settleOutgoing(requestId, new Error(`engine ${operation} request timed out`), undefined, true) }
     const timer = setTimeout(expire, REQUEST_TIMEOUT_MS)
     options.signal?.addEventListener('abort', abort, { once: true })
     outgoing.set(requestId, { abort, operation, result, timer, signal: options.signal, handleId, promptId })
@@ -67,11 +67,12 @@ export function createEngineRpcPeer({ pipe, handlers = {}, onEvent = () => {} })
     return result.promise
   }
 
-  function settleOutgoing(requestId, error, value) {
+  function settleOutgoing(requestId, error, value, retain = false) {
     const pending = outgoing.get(requestId)
     if (pending === undefined) return
     outgoing.delete(requestId); clearTimeout(pending.timer)
     pending.signal?.removeEventListener('abort', pending.abort)
+    if (retain) abandoned.set(requestId, Object.freeze({ handleId: pending.handleId, operation: pending.operation, promptId: pending.promptId }))
     if (error === undefined) pending.result.resolve(value)
     else pending.result.reject(error)
   }
@@ -80,9 +81,10 @@ export function createEngineRpcPeer({ pipe, handlers = {}, onEvent = () => {} })
     if (frame.channel !== 'engine') return false
     if (!accepting) throw new Error('engine RPC frame arrived after close')
     if (frame.type === 'response') {
-      const payload = responsePayload(frame.payload); const pending = outgoing.get(frame.requestId)
+      const payload = responsePayload(frame.payload); const pending = outgoing.get(frame.requestId) ?? abandoned.get(frame.requestId)
       if (pending === undefined) throw new Error('engine response has no pending request')
       if (!same(frame.handleId, pending.handleId) || !same(frame.promptId, pending.promptId) || payload.operation !== pending.operation) throw new Error('engine response correlation mismatch')
+      if (abandoned.delete(frame.requestId)) return true
       if (payload.ok) settleOutgoing(frame.requestId, undefined, payload.value)
       else settleOutgoing(frame.requestId, new Error(payload.error))
       return true
@@ -141,8 +143,9 @@ export function createEngineRpcPeer({ pipe, handlers = {}, onEvent = () => {} })
     await Promise.allSettled([timeout(Promise.allSettled(drains), CLOSE_TIMEOUT_MS, 'engine RPC handler drain'),
       timeout(Promise.allSettled([...controls]), CLOSE_TIMEOUT_MS, 'engine RPC control drain'), timeout(eventTail, CLOSE_TIMEOUT_MS, 'engine RPC event drain')])
     incoming.clear(); controls.clear(); eventCount = 0
+    abandoned.clear()
   }
 
   return Object.freeze({ cancel, close, dispose, event, onFrame, request,
-    stats: () => Object.freeze({ completed: completed.size, controls: controls.size, events: eventCount, incoming: incoming.size, outgoing: outgoing.size }) })
+    stats: () => Object.freeze({ abandoned: abandoned.size, completed: completed.size, controls: controls.size, events: eventCount, incoming: incoming.size, outgoing: outgoing.size }) })
 }
