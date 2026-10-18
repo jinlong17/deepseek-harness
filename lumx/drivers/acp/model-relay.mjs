@@ -81,9 +81,9 @@ export async function createAcpModelRelay(options) {
   const lifecycle = { accepting: true }
   const activeAdmissions = new Set()
   const activeForwards = new Set()
-  const stats = { admittedOperations: 0, deniedOperations: 0, forwarded: 0, providerResponses: 0 }
+  const stats = { admittedOperations: 0, clientDisconnects: 0, deniedOperations: 0, forwarded: 0, providerResponses: 0 }
 
-  const admit = async (operation) => {
+  const admit = async (operation, signal) => {
     if (!lifecycle.accepting) throw new Error('LUMX ACP relay is disposed')
     if (!['create', 'resume', 'prompt', 'forward'].includes(operation)) throw new Error('unsupported ACP relay operation')
     const identity = options.getIdentity()
@@ -94,6 +94,9 @@ export async function createAcpModelRelay(options) {
       type: identity.type,
     })
     const admission = new AbortController()
+    const abortAdmission = () => admission.abort(signal.reason ?? new Error('LUMX ACP relay admission cancelled'))
+    signal?.addEventListener('abort', abortAdmission, { once: true })
+    if (signal?.aborted === true) abortAdmission()
     const timer = setTimeout(() => admission.abort(new Error('LUMX ACP relay admission timed out')), ADMISSION_TIMEOUT_MS)
     activeAdmissions.add(admission)
     let result
@@ -109,6 +112,7 @@ export async function createAcpModelRelay(options) {
       throw new LumxByokAdmissionError('identity_rejected')
     } finally {
       clearTimeout(timer)
+      signal?.removeEventListener('abort', abortAdmission)
       activeAdmissions.delete(admission)
     }
     if (!lifecycle.accepting) throw new Error('LUMX ACP relay is disposed')
@@ -131,19 +135,24 @@ export async function createAcpModelRelay(options) {
       const presented = authorization.startsWith('Bearer ') ? authorization.slice(7) : ''
       if (!equalSecret(presented, capability)) return json(response, 401, { error: { code: 'relay_capability_rejected' } })
       if (request.method !== 'POST' || request.url !== '/v1/chat/completions') return json(response, 404, { error: { code: 'relay_route_rejected' } })
-      const body = await readBody(request)
-      const payload = JSON.parse(body.toString('utf8'))
-      if (payload === null || typeof payload !== 'object' || payload.model !== options.model) return json(response, 400, { error: { code: 'relay_model_rejected' } })
-      await admit('forward')
-
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(new Error('provider forward timed out')), FORWARD_TIMEOUT_MS)
-      const abortForward = () => controller.abort(new Error('relay client disconnected'))
+      const abortForward = () => {
+        if (!controller.signal.aborted) stats.clientDisconnects += 1
+        controller.abort(new Error('relay client disconnected'))
+      }
+      const abortOnClose = () => { if (!response.writableEnded) abortForward() }
       request.once('aborted', abortForward)
-      response.once('close', () => { if (!response.writableEnded) abortForward() })
+      response.once('close', abortOnClose)
       activeForwards.add(controller)
-      stats.forwarded += 1
       try {
+        if (request.destroyed || response.destroyed) abortForward()
+        const body = await readBody(request)
+        const payload = JSON.parse(body.toString('utf8'))
+        if (payload === null || typeof payload !== 'object' || payload.model !== options.model) return json(response, 400, { error: { code: 'relay_model_rejected' } })
+        await admit('forward', controller.signal)
+        controller.signal.throwIfAborted()
+        stats.forwarded += 1
         const upstream = await fetch(providerEndpoint, {
           body,
           headers: { authorization: `Bearer ${options.providerKey}`, 'content-type': 'application/json' },
@@ -156,6 +165,7 @@ export async function createAcpModelRelay(options) {
       } finally {
         clearTimeout(timer)
         request.off('aborted', abortForward)
+        response.off('close', abortOnClose)
         activeForwards.delete(controller)
       }
     } catch (error) {

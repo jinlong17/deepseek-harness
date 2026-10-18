@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import test from 'node:test'
 
 import { createAcpModelRelay } from './model-relay.mjs'
@@ -289,6 +289,36 @@ test('dispose settles validation that never resolves', async (t) => {
   await started
   await relay.dispose()
   assert.match((await pending).message, /disposed/)
+  assert.equal(upstream.requests.length, 0)
+  assert.equal(relay.stats.forwarded, 0)
+})
+
+test('client disconnect during validation settles with zero late provider I/O', async (t) => {
+  const upstream = await provider(t)
+  let startedResolve
+  const started = new Promise(resolve => { startedResolve = resolve })
+  let release
+  const blocked = new Promise(resolve => { release = resolve })
+  const relay = await createAcpModelRelay({
+    engineId: 'qwen-0.24.0', getIdentity: () => identity, launchId: 'launch-client-abort', model: 'synthetic-model',
+    providerEndpoint: upstream.endpoint, providerKey: 'provider-only-key', sessionId: 'session-client-abort',
+    gateway: { validate: async input => { startedResolve(); await blocked; return { active: true, expiresAt: future, subject: input.subject } } },
+  })
+  t.after(() => relay.dispose())
+  const endpoint = new URL(`${relay.endpoint}/chat/completions`)
+  const request = httpRequest(endpoint, { method: 'POST', headers: { authorization: `Bearer ${relay.capability}`, 'content-type': 'application/json' } })
+  request.on('error', () => {})
+  request.end(JSON.stringify({ model: 'synthetic-model' }))
+  await started
+  const closed = new Promise(resolve => request.once('close', resolve))
+  request.destroy(new Error('caller cancelled'))
+  await closed
+  for (let attempt = 0; relay.stats.clientDisconnects === 0 && attempt < 100; attempt += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal(relay.stats.clientDisconnects, 1)
+  release()
+  await relay.admit('prompt')
   assert.equal(upstream.requests.length, 0)
   assert.equal(relay.stats.forwarded, 0)
 })
