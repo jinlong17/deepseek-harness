@@ -97,7 +97,7 @@ test('a throwing setup commit guard leaves an inspectable log but zero recovery 
 test('a setup commit guard cannot mutate the prepared durable prefix before publication', async t => {
   const root = mkdtempSync(join(tmpdir(), 'external-guard-mutation-')); t.after(() => rmSync(root, { recursive: true, force: true }))
   const engine = fakeEngine(); const first = await runtime(t, engine, root)
-  await assert.rejects(first.ctx.agents.create({ sessionId: 'guard-mutation', setup: (_ctx, agent) => ({ commit() { agent.followup(user()) } }) }), /changed after its durable birth prefix/)
+  await assert.rejects(first.ctx.agents.create({ sessionId: 'guard-mutation', setup: (_ctx, agent) => ({ commit() { agent.followup(user()) } }) }), /changed after its durable publication prefix/)
   assert.equal(engine.calls.prompt, 0); assert.equal(first.ctx.agents.get('guard-mutation'), undefined)
   const recovering = fakeEngine(); const fresh = await runtime(t, recovering, root)
   await assert.rejects(fresh.ctx.agents.resume({ resumeSessionId: 'guard-mutation' }), /not committed/)

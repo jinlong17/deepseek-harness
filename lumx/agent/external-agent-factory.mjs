@@ -95,7 +95,9 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, eligibility, 
         if (failures.length > 1) throw new AggregateError(failures, 'external Agent teardown failed')
       })())
       disposeOwned = async ownerTriggered => { if (!ownerTriggered) await Promise.resolve(releaseOwner()); await dispose() }
+      const publicationSeq = session.seq
       setupCommit?.commit(); assertTransaction()
+      if (session.seq !== publicationSeq) throw new Error('external Agent changed after its durable publication prefix')
       birth?.assertUnchanged(session.snapshotEvents())
       birth?.commitSync(); assertTransaction()
       detachSession = ctx.sessions.enter(session); detachAgent = ctx.agents.enter(agent, options.parentAgent)

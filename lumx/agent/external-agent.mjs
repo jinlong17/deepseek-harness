@@ -71,6 +71,7 @@ export class ExternalQwenAgent {
   #active = false
   #frameRevision = 0
   #maintenance
+  #parked = false
   #running
   #retiredPromptOrder = []
   #retiredPrompts = new Set()
@@ -96,6 +97,7 @@ export class ExternalQwenAgent {
   steer(message) { this.send(message, 'next-step', true) }
   inject(message) { this.send(message, 'next-step', false) }
   cancel(cause, options = {}) {
+    if (cause?.kind === 'disposed') this.#parked = true
     if (!options.keepInbox) this.inbox.clear()
     const promptId = this.#running?.promptId; this.#abort?.abort(cause)
     if (promptId !== undefined) this.#trackControl(this.engine.cancel({ handleId: this.handleId, promptId }))
@@ -154,7 +156,7 @@ export class ExternalQwenAgent {
     task.catch(error => { this.#controlFailure ??= error }).finally(() => this.#controls.delete(task))
   }
   #wake() {
-    if (!this.#active || this.#disposed || this.#running !== undefined || this.#maintenance !== undefined) return
+    if (!this.#active || this.#disposed || this.#parked || this.#running !== undefined || this.#maintenance !== undefined) return
     const running = { done: undefined, promptId: undefined, attempt: undefined }; this.#running = running
     const operation = this.#drive(running)
     this.dispatch.emit('agent/status', { status: 'running' })
