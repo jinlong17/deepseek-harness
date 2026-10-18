@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -13,7 +13,7 @@ import { createExternalEngineRouter, createExternalQwenFactory } from './externa
 
 async function runtime(t, engine, root) {
   const ctx = new Context(); await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry)
-  await ctx.plugin(JsonlSessionPersistence, { root })
+  await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
   const router = createExternalEngineRouter(); engine.router = router
   const owner = createExternalQwenFactory(ctx, { artifactIdentity: 'artifact-sha256', engine, engineId: 'qwen-code-0.24.0', model: 'qwen3.7-max', provider: 'external-qwen', router })
   t.after(async () => { await owner.close().catch(() => {}); await ctx.fiber.dispose().catch(() => {}) })
@@ -96,4 +96,56 @@ test('rejects an external-binding seed before persistence or native engine IO', 
   await assert.rejects(ctx.agents.create({ sessionId: 'bound-child', seed }), /fork from a bound session is unsupported/)
   assert.deepEqual(engine.calls, before); assert.equal(ctx.agents.get('bound-child'), undefined)
   await assert.rejects(ctx.sessionPersistence.open('bound-child', 'read'), /not found/i)
+})
+
+test('failed current turn drains a queued turn and disposal still releases the engine', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-failed-turn-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const engine = fakeEngine(); let attempt = 0
+  engine.prompt = async (_input, { handleId, promptId }) => {
+    engine.calls.prompt += 1; attempt += 1
+    if (attempt === 1) throw new Error('first turn failed')
+    await engine.router.onUpdate({ handleId, promptId, params: { sessionId: 'native-1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'recovered' } } } })
+    return { result: { stopReason: 'end_turn' } }
+  }
+  const { ctx } = await runtime(t, engine, root); const handle = await ctx.agents.create({ sessionId: 'failed-then-queued' })
+  handle.agent.followup(user()); handle.agent.followup(user())
+  await assert.rejects(handle.agent.whenIdle(), /first turn failed/)
+  assert.equal(engine.calls.prompt, 2); assert.equal(handle.agent.status, 'idle')
+  await handle.dispose(); assert.equal(engine.calls.dispose, 1)
+})
+
+test('refuses an ignorable external binding envelope and a wrong loaded native identity', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-binding-contract-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const firstEngine = fakeEngine(); const first = await runtime(t, firstEngine, root)
+  const made = await first.ctx.agents.create({ sessionId: 'binding-contract' }); await made.dispose(); await first.owner.close(); await first.ctx.fiber.dispose()
+  const log = join(root, '_no-cwd', 'binding-contract', 'session.v4.jsonl')
+  const bytes = readFileSync(log, 'utf8'); writeFileSync(log, bytes.replace('"type":"agent/external-engine-bound"', '"ignorable":true,"type":"agent/external-engine-bound"'))
+  const refused = fakeEngine(); const second = await runtime(t, refused, root)
+  await assert.rejects(second.ctx.agents.resume({ resumeSessionId: 'binding-contract' }), /binding does not match/)
+  assert.equal(refused.calls.load, 0)
+
+  writeFileSync(log, bytes); const wrong = fakeEngine(); wrong.load = async () => { wrong.calls.load += 1; return { nativeSessionId: 'different-native' } }
+  const third = await runtime(t, wrong, root)
+  await assert.rejects(third.ctx.agents.resume({ resumeSessionId: 'binding-contract' }), /different native session identity/)
+  assert.equal(wrong.calls.create, 0); assert.equal(third.ctx.agents.get('binding-contract'), undefined)
+})
+
+test('resume durably repairs an interrupted external turn before native load', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-interrupted-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const firstEngine = fakeEngine(); const first = await runtime(t, firstEngine, root)
+  const made = await first.ctx.agents.create({ sessionId: 'interrupted-external' })
+  made.agent.session.append('turn/start', { turn: 1 }); await first.ctx.sessionPersistence.flush()
+  await made.dispose(); await first.owner.close(); await first.ctx.fiber.dispose()
+
+  const secondEngine = fakeEngine(); const second = await runtime(t, secondEngine, root)
+  const loaded = await second.ctx.agents.resume({ resumeSessionId: 'interrupted-external' })
+  assert.deepEqual(loaded.agent.session.snapshotEvents().map(event => event.type), [
+    'agent/external-engine-bound', 'turn/start', 'turn/end', 'session/end-seed',
+  ])
+  assert.deepEqual(loaded.agent.session.snapshotEvents()[2].data.reason, { kind: 'interrupted' })
+  await loaded.dispose(); await second.owner.close(); await second.ctx.fiber.dispose()
+
+  const verify = await runtime(t, fakeEngine(), root); const storage = await verify.ctx.sessionPersistence.open('interrupted-external', 'read')
+  const stored = await storage.read(); await storage.close()
+  assert.deepEqual(stored.events.map(event => event.type), ['agent/external-engine-bound', 'turn/start', 'turn/end'])
 })

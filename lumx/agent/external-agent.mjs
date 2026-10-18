@@ -95,13 +95,16 @@ export class ExternalQwenAgent {
     if (promptId !== undefined) void this.engine.cancel({ handleId: this.handleId, promptId }).catch(() => {})
   }
   async whenIdle() {
+    const failures = []
     for (;;) {
       const work = this.#running?.done ?? this.#maintenance
-      await Promise.all([work].filter(Boolean))
+      try { await Promise.all([work].filter(Boolean)) } catch (error) { failures.push(error) }
       if (this.#running !== undefined || this.#maintenance !== undefined) continue
-      await this.flush()
-      if (this.#running === undefined && this.#maintenance === undefined) return
+      try { await this.flush() } catch (error) { failures.push(error) }
+      if (this.#running === undefined && this.#maintenance === undefined) break
     }
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1) throw new AggregateError(failures, 'external Agent quiescence failed')
   }
   runMaintenance(job) {
     this.#assertLive(); if (this.#running !== undefined || this.#maintenance !== undefined) throw new Error(`agent "${this.id}" already has active work`)
@@ -124,7 +127,13 @@ export class ExternalQwenAgent {
     const option = params.options.find(value => value.kind === wanted)
     return option === undefined ? { outcome: { outcome: 'cancelled' } } : { outcome: { outcome: 'selected', optionId: option.optionId } }
   }
-  async dispose() { this.#disposed = true; this.cancel({ kind: 'disposed' }, { keepInbox: true }); await this.whenIdle().catch(() => {}); return this.engine.dispose({ handleId: this.handleId }) }
+  async dispose() {
+    this.#disposed = true; this.cancel({ kind: 'disposed' }, { keepInbox: true }); const failures = []
+    try { await this.whenIdle() } catch (error) { failures.push(error) }
+    try { await this.engine.dispose({ handleId: this.handleId }) } catch (error) { failures.push(error) }
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1) throw new AggregateError(failures, 'external Agent disposal failed')
+  }
 
   #assertLive() { if (this.#disposed) throw new Error(`external agent "${this.id}" is disposed`) }
   #wake() {

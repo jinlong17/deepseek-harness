@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto'
+import { interruptedTurnClosers } from '../../packages/core/session/lib/index.js'
 
 import { ExternalQwenAgent } from './external-agent.mjs'
 
 function bindingOf(events, expected) {
   const bindings = events.filter(event => event.type === 'agent/external-engine-bound')
   if (bindings.length !== 1) throw new Error('persisted external Agent must contain exactly one engine binding')
-  const binding = bindings[0].data
-  if (binding.version !== 1 || binding.ignorable !== undefined || binding.engineId !== expected.engineId || binding.artifactIdentity !== expected.artifactIdentity
+  const envelope = bindings[0]; const binding = envelope.data
+  if (envelope.ignorable !== undefined || binding.version !== 1 || binding.engineId !== expected.engineId || binding.artifactIdentity !== expected.artifactIdentity
     || typeof binding.nativeSessionId !== 'string' || binding.nativeSessionId.length < 1) throw new Error('persisted external Agent binding does not match the selected engine artifact')
   return binding
 }
@@ -54,7 +55,10 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engin
       } else {
         const read = await storage.read(0, undefined, { signal }); assertTransaction()
         bindingOf(read.events, { artifactIdentity, engineId })
-        session = ctx.sessions.prepare(sessionId, { seed: read.events, meta: storage.header, inheritedEventCount: storage.inheritedEventCount, eventState: read.eventState })
+        const closers = interruptedTurnClosers(read.events)
+        if (closers.length > 0) await storage.append(closers, { signal })
+        session = ctx.sessions.prepare(sessionId, { seed: [...read.events, ...closers], meta: storage.header,
+          inheritedEventCount: storage.inheritedEventCount, eventState: read.eventState })
       }
       handleId = randomUUID(); const engineSession = mode === 'create'
         ? await engine.create({}, { handleId, signal: signal ?? new AbortController().signal })
@@ -67,7 +71,7 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engin
       detachRoute = router.attach(handleId, agent)
       const setupCommit = await options.setup?.(agent.ctx, agent); assertTransaction()
       if (mode === 'create') session.append('agent/external-engine-bound', { version: 1, engineId, nativeSessionId: engineSession.nativeSessionId, artifactIdentity })
-      const storedCount = mode === 'create' ? 0 : session.firstLiveSeq
+      const storedCount = mode === 'create' ? 0 : session.seq
       const suffix = session.snapshotEvents(storedCount)
       if (suffix.length > 0) await storage.append(suffix, { signal })
       await storage.flush({ signal }); assertTransaction()
@@ -75,7 +79,9 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, engine, engin
       let disposeCore
       const dispose = () => (disposeCore ??= (async () => {
         const failures = []
-        try { agent.cancel({ kind: 'disposed' }, { keepInbox: true }); await agent.whenIdle(); await agent.dispose() } catch (error) { failures.push(error) }
+        agent.cancel({ kind: 'disposed' }, { keepInbox: true })
+        try { await agent.whenIdle() } catch (error) { failures.push(error) }
+        try { await agent.dispose() } catch (error) { failures.push(error) }
         detachRoute?.(); detachAgent?.(); detachSession?.()
         try { await storage.close() } catch (error) { failures.push(error) }
         try { await agent.scope.dispose() } catch (error) { failures.push(error) }
