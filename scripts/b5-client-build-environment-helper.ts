@@ -56,7 +56,7 @@ function stringMap(value: unknown, label: string): Record<string, string> {
   if (!rows.every(([key, item]) => key.length > 0 && typeof item === 'string')) {
     throw new Error(`${label} is not a string map`)
   }
-  return Object.fromEntries(rows.sort(([left], [right]) => left.localeCompare(right)))
+  return Object.fromEntries(rows.sort(([left], [right]) => left.localeCompare(right))) as Record<string, string>
 }
 
 function readPlan(path: string): EnvironmentPlan {

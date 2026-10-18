@@ -168,6 +168,7 @@ it('rolls back the original persisted row after late denial and accepts a subseq
   ])
   const entry = ctx.loader.store.race
   const persisted = ctx.loader.root.data[0]
+  if (!entry || !persisted) throw new Error('race fixture entry was not retained')
   let deny = true
   ctx.on('loader/entry-admit', (candidate, next) => {
     if (candidate.phase === 'pre-activate' && deny) throw new Error('late denial')
