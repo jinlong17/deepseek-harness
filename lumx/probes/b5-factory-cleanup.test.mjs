@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createConnection } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -9,7 +10,7 @@ import { after, test } from 'node:test'
 import { spawn } from 'node:child_process'
 
 import { closeB5HostOwners, withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
-import { h1Stubs } from './b5-fixed-stubs.mjs'
+import { h1Stubs, qwenStub } from './b5-fixed-stubs.mjs'
 import { listen } from './b5-hook-common.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -113,6 +114,24 @@ test('each B5 factory closes prepared loopback resources idempotently before Hos
   await factoryCleanup('external-stream', 'b5-external-qwen-factory.mjs', 'external-create', 'external-qwen', 'finish')
   await factoryCleanup('external-abort', 'b5-external-qwen-factory.mjs', 'external-create', 'external-qwen', 'abort')
   await factoryCleanup('external-idle', 'b5-external-qwen-factory.mjs', 'external-create', 'external-qwen')
+})
+
+test('an already-destroyed Qwen stream settles before provider close', async () => {
+  const barriers = { streamActive: false, streamFirst: Promise.withResolvers(), streamRelease: Promise.withResolvers(), streamFinished: Promise.withResolvers(), cancelStarted: Promise.withResolvers(), cancelObserved: Promise.withResolvers() }
+  let handler; let closes = 0
+  const stub = await qwenStub({ lateEffect: '/tmp/late', rejectEffect: '/tmp/reject', toolCommand: 'true', rejectCommand: 'true', worldEffect: '/tmp/world' }, barriers, async candidate => {
+    handler = candidate
+    return { close: async () => { closes += 1 }, port: 0 }
+  })
+  const response = new EventEmitter()
+  Object.assign(response, { destroyed: true, writableEnded: false, writableFinished: false, writeHead() {}, write() {}, end() {} })
+  const request = { async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ model: 'qwen', messages: [{ role: 'user', content: 'B5 STREAM' }] })) } }
+  const running = handler(request, response)
+  await barriers.streamFirst.promise
+  barriers.streamRelease.resolve()
+  await running
+  await stub.close()
+  assert.equal(closes, 1)
 })
 
 test('H1 partial listener acquisition closes a real first listener before rejecting', async () => {

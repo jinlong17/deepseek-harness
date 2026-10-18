@@ -57,9 +57,9 @@ export async function h1Stubs(nativeCanaryPath, listenFn = listen) {
   }
 }
 
-export async function qwenStub(config, barriers) {
+export async function qwenStub(config, barriers, listenFn = listen) {
   const requests = []; let ordinal = 0; let cancelCloses = 0
-  const server = await listen(async (request, response) => {
+  const server = await listenFn(async (request, response) => {
     const payload = await body(request); requests.push({ method: request.method, path: request.url, payload }); ordinal += 1
     response.writeHead(200, { 'content-type': 'text/event-stream' })
     const messages = JSON.stringify(payload.messages)
@@ -71,12 +71,22 @@ export async function qwenStub(config, barriers) {
         settled = true
         barriers.streamFinished?.resolve()
       }
-      const terminal = new Promise(resolve => {
-        const done = () => { settle(); resolve() }
-        response.once('finish', done)
-        response.once('close', done)
-        response.once('error', done)
-      })
+      let terminalSettled = false
+      let resolveTerminal
+      const done = () => {
+        if (terminalSettled) return
+        terminalSettled = true
+        response.off('finish', done)
+        response.off('close', done)
+        response.off('error', done)
+        settle()
+        resolveTerminal()
+      }
+      const terminal = new Promise(resolve => { resolveTerminal = resolve })
+      response.once('finish', done)
+      response.once('close', done)
+      response.once('error', done)
+      if (response.destroyed || response.writableFinished || response.writableEnded) done()
       try {
         if (!response.destroyed && !response.writableEnded) {
           const base = { id: 'g9-b5-stream', object: 'chat.completion.chunk', created: 0, model: payload.model }
@@ -87,7 +97,7 @@ export async function qwenStub(config, barriers) {
         if (!response.destroyed && !response.writableEnded) finish(response, payload, '_FINAL')
         await terminal
       } finally {
-        settle()
+        done()
       }
       return
     }
