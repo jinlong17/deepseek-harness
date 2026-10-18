@@ -45,12 +45,17 @@ function parse(bytes) {
 function matches(receipt, expected) {
   return Object.entries(expected).every(([key, value]) => receipt[key] === value)
 }
+function fatal(error, cause) {
+  const failure = new AggregateError(cause === undefined ? [error] : [error, cause], 'external session eligibility state is uncertain')
+  failure.eligibilityFatal = true
+  return failure
+}
 
 /** Product-owned recovery eligibility. The DSH log remains the transcript and binding authority. */
-export function createExternalSessionEligibilityStore(input) {
+export function createExternalSessionEligibilityStore(input, filesOverride) {
   if (!['consumer', 'developer'].includes(input.mode)) throw new Error('eligibility mode is invalid')
   if (typeof input.persistenceScope !== 'string' || input.persistenceScope.length < 1) throw new Error('eligibility persistence scope is invalid')
-  const files = createEligibilityFiles(input)
+  const files = filesOverride ?? createEligibilityFiles(input)
   const receiptPath = sessionId => files.path(digest([input.mode, input.persistenceScope, sessionId]))
   return Object.freeze({
     roots: Object.freeze({ eligibility: files.markerRoot, persistence: files.logRoot }),
@@ -62,13 +67,33 @@ export function createExternalSessionEligibilityStore(input) {
       const preparedBytes = encode(prepared); const committedBytes = encode(committed)
       const reservation = files.reserve(receiptPath(expected.sessionId), preparedBytes, committedBytes)
       let state = 'prepared'
+      const revoke = () => {
+        const current = parse(files.read(reservation.path))
+        if (!matches(current, expected) || current.nonce !== nonce || !['prepared', 'committed', 'revoked'].includes(current.state)) throw new Error('eligibility birth no longer owns its receipt')
+        if (current.state !== 'revoked') files.replaceOwned(reservation, encode(current), encode(Object.freeze({ ...expected, state: 'revoked', nonce })))
+        files.discardTemporary(reservation.temporary); state = 'revoked'
+      }
       return Object.freeze({
-        commitSync() { if (state !== 'prepared') throw new Error('eligibility birth is not prepared'); files.replaceOwned(reservation, preparedBytes); state = 'committed' },
+        assertUnchanged(eventsNow) {
+          if (state !== 'prepared' || eventsNow.length !== expected.prefixLength || digest(eventsNow) !== expected.prefixSha256) throw new Error('external session changed after its durable birth prefix was prepared')
+        },
+        commitSync() {
+          if (state !== 'prepared') throw new Error('eligibility birth is not prepared')
+          try { files.replaceOwned(reservation, preparedBytes); state = 'committed' } catch (error) {
+            let current
+            try { current = parse(files.read(reservation.path)) } catch (inspectError) { state = 'uncertain'; throw fatal(error, inspectError) }
+            if (!matches(current, expected) || current.nonce !== nonce) { state = 'uncertain'; throw fatal(error) }
+            if (current.state === 'committed') {
+              state = 'committed'
+              try { revoke() } catch (revokeError) { state = 'uncertain'; throw fatal(error, revokeError) }
+            } else if (current.state !== 'prepared') { state = 'uncertain'; throw fatal(error) }
+            throw error
+          }
+        },
         rejectSync() {
           if (state === 'accepted') throw new Error('accepted eligibility birth cannot be revoked')
           if (state === 'revoked') return
-          const current = state === 'committed' ? committed : prepared; const revoked = Object.freeze({ ...expected, state: 'revoked', nonce })
-          files.replaceOwned(reservation, encode(current), encode(revoked)); files.discardTemporary(reservation.temporary); state = 'revoked'
+          revoke()
         },
         accept() { if (state !== 'committed') throw new Error('eligibility birth is not committed'); files.discardTemporary(reservation.temporary); state = 'accepted' },
         state() { return state },

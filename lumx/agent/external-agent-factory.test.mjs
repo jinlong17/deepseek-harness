@@ -10,14 +10,15 @@ import SessionStore from '../../packages/core/session/lib/index.js'
 import { createUserMessage } from '../../packages/llm/llm/lib/index.js'
 import JsonlSessionPersistence from '../../packages/session/session-persistence-jsonl/lib/index.js'
 import { createExternalEngineRouter, createExternalQwenFactory } from './external-agent-factory.mjs'
+import { createEligibilityFiles } from './external-session-eligibility-files.mjs'
 import { createExternalSessionEligibilityStore } from './external-session-eligibility.mjs'
 
-async function runtime(t, engine, root, approval) {
+async function runtime(t, engine, root, approval, eligibilityOverride) {
   const ctx = new Context(); await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry)
   if (approval !== undefined) ctx.provide('approval', approval)
   await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
   const router = createExternalEngineRouter(); engine.router = router
-  const eligibility = createExternalSessionEligibilityStore({ eligibilityRoot: `${root}-eligibility`, mode: 'developer', persistenceRoot: root, persistenceScope: root })
+  const eligibility = eligibilityOverride ?? createExternalSessionEligibilityStore({ eligibilityRoot: `${root}-eligibility`, mode: 'developer', persistenceRoot: root, persistenceScope: root })
   const owner = createExternalQwenFactory(ctx, { artifactIdentity: 'artifact-sha256', eligibility, engine, engineId: 'qwen-code-0.24.0', model: 'qwen3.7-max', provider: 'external-qwen', router })
   t.after(async () => { await owner.close().catch(() => {}); await ctx.fiber.dispose().catch(() => {}) })
   return { ctx, owner, router }
@@ -91,6 +92,32 @@ test('a throwing setup commit guard leaves an inspectable log but zero recovery 
   const recovering = fakeEngine(); const fresh = await runtime(t, recovering, root)
   await assert.rejects(fresh.ctx.agents.resume({ resumeSessionId: 'guard-refused' }), /not committed/)
   assert.equal(recovering.calls.load, 0); assert.equal(recovering.calls.create, 0)
+})
+
+test('a setup commit guard cannot mutate the prepared durable prefix before publication', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-guard-mutation-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const engine = fakeEngine(); const first = await runtime(t, engine, root)
+  await assert.rejects(first.ctx.agents.create({ sessionId: 'guard-mutation', setup: (_ctx, agent) => ({ commit() { agent.followup(user()) } }) }), /changed after its durable birth prefix/)
+  assert.equal(engine.calls.prompt, 0); assert.equal(first.ctx.agents.get('guard-mutation'), undefined)
+  const recovering = fakeEngine(); const fresh = await runtime(t, recovering, root)
+  await assert.rejects(fresh.ctx.agents.resume({ resumeSessionId: 'guard-mutation' }), /not committed/)
+  assert.equal(recovering.calls.load, 0); assert.equal(recovering.calls.create, 0)
+})
+
+test('unrevokable commit ambiguity latches the factory closed and preserves the explicit committed artifact', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-commit-ambiguity-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const eligibilityRoot = `${root}-eligibility`; const real = createEligibilityFiles({ eligibilityRoot, persistenceRoot: root }); let commit = true
+  const faulting = { ...real, replaceOwned(...args) {
+    if (args[2] !== undefined) throw new Error('synthetic revoke failure')
+    const result = real.replaceOwned(...args); if (commit) { commit = false; throw new Error('synthetic directory fsync ambiguity') }; return result
+  } }
+  const eligibility = createExternalSessionEligibilityStore({ eligibilityRoot, mode: 'developer', persistenceRoot: root, persistenceScope: root }, faulting)
+  const engine = fakeEngine(); const { ctx, owner } = await runtime(t, engine, root, undefined, eligibility)
+  await assert.rejects(ctx.agents.create({ sessionId: 'ambiguous-commit' }), error => error instanceof AggregateError && /cleanup was incomplete/.test(error.message))
+  assert.equal(owner.stats().accepting, false); assert.equal(engine.calls.create, 1); assert.equal(engine.calls.load, 0)
+  await assert.rejects(ctx.agents.create({ sessionId: 'after-ambiguity' }), /factory|available|disposed/i)
+  const stored = await ctx.sessionPersistence.open('ambiguous-commit', 'read'); const read = await stored.read();
+  assert.equal(eligibility.verifyCommitted({ ownedWriteHandle: stored, events: read.events }).prefixLength, 1); await stored.close()
 })
 
 test('factory close aborts and drains a pending transaction without late publication', async t => {

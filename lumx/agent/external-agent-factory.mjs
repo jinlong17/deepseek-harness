@@ -96,6 +96,7 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, eligibility, 
       })())
       disposeOwned = async ownerTriggered => { if (!ownerTriggered) await Promise.resolve(releaseOwner()); await dispose() }
       setupCommit?.commit(); assertTransaction()
+      birth?.assertUnchanged(session.snapshotEvents())
       birth?.commitSync(); assertTransaction()
       detachSession = ctx.sessions.enter(session); detachAgent = ctx.agents.enter(agent, options.parentAgent)
       ctx.sessions.announce(session); await ctx.agents.announce(agent, mode === 'create' ? 'startup' : 'resume', signal)
@@ -110,6 +111,9 @@ export function createExternalQwenFactory(ctx, { artifactIdentity, eligibility, 
         if (disposeOwned === undefined) try { await storage?.close() } catch (cleanupError) { cleanup.push(cleanupError) }
         if (disposeOwned === undefined) try { await agent?.scope.dispose() } catch (cleanupError) { cleanup.push(cleanupError) }
         try { await Promise.resolve(releaseOwner()) } catch (cleanupError) { cleanup.push(cleanupError) }
+        if (error?.eligibilityFatal === true || cleanup.some(value => value?.eligibilityFatal === true)) {
+          accepting = false; factoryAbort.abort(error); await Promise.resolve(release()).catch(cleanupError => cleanup.push(cleanupError))
+        }
         if (cleanup.length > 0) throw new AggregateError([error, ...cleanup], `external Agent transaction failed and cleanup was incomplete: ${error instanceof Error ? error.message : String(error)}`)
       }
       throw error

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { createEligibilityFiles } from './external-session-eligibility-files.mjs'
 import { createExternalSessionEligibilityStore } from './external-session-eligibility.mjs'
 
 function fixture(t) {
@@ -51,4 +52,25 @@ test('construction refuses overlapping, private and symbolic root layouts before
   assert.throws(() => make(join(root, '.private', 'receipts')), /private/)
   const alias = join(root, 'alias'); symlinkSync(sessions, alias); assert.throws(() => make(alias), /symbolic link/)
   assert.deepEqual(readdirSync(sessions), [])
+})
+
+test('a post-rename commit error revokes the exact committed nonce before reporting failure', async t => {
+  const { eligibilityRoot, events, handle, persistenceRoot } = fixture(t); const real = createEligibilityFiles({ eligibilityRoot, persistenceRoot })
+  let commit = true; const faulting = { ...real, replaceOwned(...args) { const result = real.replaceOwned(...args); if (commit && args[2] === undefined) { commit = false; throw new Error('synthetic directory fsync ambiguity') }; return result } }
+  const store = createExternalSessionEligibilityStore({ eligibilityRoot, mode: 'developer', persistenceRoot, persistenceScope: persistenceRoot }, faulting)
+  const birth = await store.prepareBirth({ ownedCreateHandle: handle, events })
+  assert.throws(() => birth.commitSync(), /synthetic directory fsync ambiguity/); assert.equal(birth.state(), 'revoked')
+  assert.throws(() => store.verifyCommitted({ ownedWriteHandle: handle, events }), /not committed/)
+})
+
+test('an ambiguous commit whose exact receipt cannot be revoked is fatal and remains explicit', async t => {
+  const { eligibilityRoot, events, handle, persistenceRoot } = fixture(t); const real = createEligibilityFiles({ eligibilityRoot, persistenceRoot })
+  let commit = true; const faulting = { ...real, replaceOwned(...args) {
+    if (args[2] !== undefined) throw new Error('synthetic revoke failure')
+    const result = real.replaceOwned(...args); if (commit) { commit = false; throw new Error('synthetic directory fsync ambiguity') }; return result
+  } }
+  const store = createExternalSessionEligibilityStore({ eligibilityRoot, mode: 'developer', persistenceRoot, persistenceScope: persistenceRoot }, faulting)
+  const birth = await store.prepareBirth({ ownedCreateHandle: handle, events })
+  assert.throws(() => birth.commitSync(), error => error?.eligibilityFatal === true && /uncertain/.test(error.message)); assert.equal(birth.state(), 'uncertain')
+  assert.equal(store.verifyCommitted({ ownedWriteHandle: handle, events }).prefixLength, 1)
 })
