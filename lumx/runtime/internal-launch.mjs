@@ -90,7 +90,7 @@ export async function launchLumxRuntimeInProcess(input) {
         governance = consumer === 'governed-h1' ? installGovernedH1Composition(hostCtx) : installLumxGovernance(hostCtx)
         if (consumer === 'external-qwen') {
           if (input.external === undefined) throw new Error('external Qwen composition input is unavailable')
-          hostCtx.inject(['agents', 'llm', 'sessionPersistence', 'sessions'], injected => {
+          hostCtx.inject(['agents', 'llm', 'sessionPersistence', 'sessionProjections', 'sessions'], injected => {
             void installExternalQwenComposition(injected, { ...input.external, sourceRoot: input.sourceRoot })
               .then(value => { external = value; externalReady.resolve(value) }, externalReady.reject)
           })
