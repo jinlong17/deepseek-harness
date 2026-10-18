@@ -57,6 +57,30 @@ function assertProcessGone(pid) {
   for (const target of [pid, -pid]) assert.throws(() => process.kill(target, 0), error => error?.code === 'ESRCH')
 }
 function exactStop() { return { code: 0, signal: null, control: { stopping: true } } }
+function processAlive(target) {
+  try { process.kill(target, 0); return true } catch (error) { if (error?.code === 'ESRCH') return false; return true }
+}
+async function emergencyHostCleanup(host) {
+  if (!processAlive(host.pid) && !processAlive(-host.pid)) return
+  const settling = host.shutdown().catch(() => {})
+  try { process.kill(-host.pid, 'SIGKILL') } catch (error) { if (error?.code !== 'ESRCH') throw error }
+  const deadline = performance.now() + 3_000
+  while ((processAlive(host.pid) || processAlive(-host.pid)) && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
+  await Promise.race([settling, new Promise((_, reject) => setTimeout(() => reject(new Error('emergency Host cleanup did not settle')), 8_000))])
+  assertProcessGone(host.pid)
+}
+async function emergencyHostsCleanup(hosts) {
+  const failures = []
+  for (const host of hosts) try { await emergencyHostCleanup(host) } catch (error) { failures.push(error) }
+  if (failures.length > 0) throw new AggregateError(failures, 'emergency Host cleanup failed')
+}
+async function cleanupTestResources({ close, complete, hosts, root }) {
+  const failures = []
+  if (!complete) try { await emergencyHostsCleanup(hosts) } catch (error) { failures.push(error) }
+  try { await close() } catch (error) { failures.push(error) }
+  try { rmSync(root, { recursive: true, force: true }) } catch (error) { failures.push(error) }
+  if (failures.length > 0) throw new AggregateError(failures, 'Host test resource cleanup failed')
+}
 
 test('caller anchors and pre-cancel reject before native process creation', async t => {
   const root = mkdtempSync(join(tmpdir(), 'lumx-host-preflight-'))
@@ -103,16 +127,11 @@ test('startup failure, timeout, and cancellation reap the native process and run
 
 test('stubborn stopped Host is killed, reaped, and cleaned after bounded shutdown', { timeout: 30_000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'lumx-host-stubborn-'))
-  t.after(() => rmSync(root, { recursive: true, force: true }))
   const value = await fixture(root, 'stubborn')
-  t.after(value.close)
   const runtimeParent = join(root, 'runtime'); mkdirSync(runtimeParent)
   const host = await value.launch({ runtimeParent }); const paths = [host.bootstrap.path, host.hostProfile.path]
-  let shutdown
-  t.after(async () => {
-    if (shutdown === undefined) { try { process.kill(-host.pid, 'SIGCONT') } catch {}; shutdown = host.shutdown() }
-    await shutdown.catch(() => {})
-  })
+  let shutdown; let complete = false
+  t.after(() => cleanupTestResources({ close: value.close, complete, hosts: [host], root }))
   assert.equal(host.governance.rows.length, 7)
   assert(host.governance.rows.every(row => row.generation === 1 && row.format === 'module' && row.url.endsWith('/lib/index.js')))
   process.kill(host.pid, 'SIGSTOP')
@@ -124,17 +143,25 @@ test('stubborn stopped Host is killed, reaped, and cleaned after bounded shutdow
   assert.ok(performance.now() - started < 20_000)
   assertProcessGone(host.pid); assert.deepEqual(readdirSync(runtimeParent), [])
   for (const path of paths) assert.equal(existsSync(path), false)
+  complete = true
 })
 
 test('two native Hosts isolate controls and persisted sessions survive a real process restart', { timeout: 90_000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'lumx-host-lifecycle-'))
-  t.after(() => rmSync(root, { recursive: true, force: true }))
   const [a, b] = await Promise.all([fixture(root, 'alpha'), fixture(root, 'beta')])
-  t.after(async () => { await Promise.all([a.close(), b.close()]) })
   const runtimeA = join(root, 'runtime-alpha'); const runtimeB = join(root, 'runtime-beta'); mkdirSync(runtimeA); mkdirSync(runtimeB)
-  const live = []
-  t.after(async () => { await Promise.all(live.map(host => host.shutdown().catch(() => {}))) })
-  const [first, second] = await Promise.all([a.launch({ runtimeParent: runtimeA }), b.launch({ runtimeParent: runtimeB })]); live.push(first, second)
+  const live = []; let complete = false
+  t.after(async () => {
+    const failures = []
+    if (!complete) try { await emergencyHostsCleanup(live) } catch (error) { failures.push(error) }
+    for (const close of [a.close, b.close]) try { await close() } catch (error) { failures.push(error) }
+    try { rmSync(root, { recursive: true, force: true }) } catch (error) { failures.push(error) }
+    if (failures.length > 0) throw new AggregateError(failures, 'two-Host test resource cleanup failed')
+  })
+  const tracked = promise => promise.then(host => { live.push(host); return host })
+  const launches = [tracked(a.launch({ runtimeParent: runtimeA })), tracked(b.launch({ runtimeParent: runtimeB }))]
+  let first; let second
+  try { [first, second] = await Promise.all(launches) } catch (error) { await Promise.allSettled(launches); throw error }
   assert.equal('ctx' in first, false)
   assert.deepEqual(Object.keys(first.process), ['pid'])
   const [alpha, beta] = await Promise.all([first.control.healthCheck(), second.control.healthCheck()])
@@ -155,21 +182,19 @@ test('two native Hosts isolate controls and persisted sessions survive a real pr
   assert.deepEqual(await restarted.shutdown(), exactStop())
   assertProcessGone(restarted.pid); assert.deepEqual(readdirSync(runtimeA), []); assert.deepEqual(readdirSync(runtimeB), [])
   assert.equal(a.requests(), 1); assert.equal(b.requests(), 1)
+  complete = true
 })
 
 test('control failure remains primary when material cleanup also fails', { timeout: 30_000 }, async t => {
-  const root = mkdtempSync(join(tmpdir(), 'lumx-host-cleanup-failure-')); t.after(() => rmSync(root, { recursive: true, force: true }))
-  const value = await fixture(root, 'cleanup-failure'); t.after(value.close)
+  const root = mkdtempSync(join(tmpdir(), 'lumx-host-cleanup-failure-'))
+  const value = await fixture(root, 'cleanup-failure')
   const runtimeParent = join(root, 'runtime'); mkdirSync(runtimeParent)
   const prepared = await value.prepare({ runtimeParent }); let cleanupAttempts = 0
   const host = await launchLumxHost({ ...prepared, async cleanup() {
     cleanupAttempts += 1; await prepared.cleanup(); throw new Error('synthetic material cleanup failure')
   } })
-  let shutdown
-  t.after(async () => {
-    if (shutdown === undefined) { try { process.kill(-host.pid, 'SIGCONT') } catch {}; shutdown = host.shutdown() }
-    await shutdown.catch(() => {})
-  })
+  let shutdown; let complete = false
+  t.after(() => cleanupTestResources({ close: value.close, complete, hosts: [host], root }))
   process.kill(host.pid, 'SIGSTOP'); shutdown = host.shutdown()
   let failure
   try { await shutdown; assert.fail('injected cleanup failure unexpectedly fulfilled') } catch (error) { failure = error }
@@ -177,6 +202,7 @@ test('control failure remains primary when material cleanup also fails', { timeo
   assert.match(failure.errors[1]?.message ?? '', /synthetic material cleanup failure/u)
   assert.equal(cleanupAttempts, 1); assert.deepEqual(failure.outcome, { code: null, signal: 'SIGKILL' })
   assertProcessGone(host.pid); assert.deepEqual(readdirSync(runtimeParent), [])
+  complete = true
 })
 
 test('supported native Host selects the product platform-stub without opening a BYOK relay', { timeout: 30_000 }, async t => {
