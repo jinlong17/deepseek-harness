@@ -20,7 +20,7 @@ function withAbort(promise, signal) {
 }
 
 /** Launch only caller-prepared and revalidated LUMX Host material. */
-export async function launchLumxHost(prepared) {
+export async function launchLumxHost(prepared, { beforeBootstrap } = {}) {
   const materials = verifyLumxHostLaunch(prepared)
   const { externalOwner, input, nodePath, paths, payload, profile, relay } = materials
   const { bootstrap, configPath, hostEntry, processHome, profilePath, temporary } = paths
@@ -50,6 +50,10 @@ export async function launchLumxHost(prepared) {
       bridge = createHostProcessBridge({ child, engine: externalOwner?.engine ?? unavailable, generation: payload.generation })
       bridge.ready.then(resolveReady, rejectReady)
     })
+    if (beforeBootstrap !== undefined) {
+      if (typeof beforeBootstrap !== 'function') throw new Error('Host pre-bootstrap hook is invalid')
+      await withTimeout(beforeBootstrap(Object.freeze({ pgid: child.pid, pid: child.pid })), input.startupTimeoutMs ?? 30_000, 'Host ownership acknowledgement')
+    }
     child.stdin.write(BOOT_FRAME)
     let readyValue
     try {

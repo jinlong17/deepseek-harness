@@ -52,12 +52,25 @@ export async function prepareExternalEngineOwner(input) {
       try { stateLease.release() } catch (error) { failures.push(error) }
       if (failures.length === 1) throw failures[0]
       if (failures.length > 1) throw new AggregateError(failures, 'external engine owner teardown failed')
-      const groups = cleanup?.handles?.flatMap(handle => [
-        Object.freeze({ owner: 'guardian', pid: handle.guardian.pid, pgid: null, exit: handle.guardian.exit, result: 'exited' }),
-        Object.freeze({ owner: 'qwen', pid: handle.qwen.pid, pgid: handle.qwen.pgid, exit: handle.qwen.exit, result: handle.processGroupReaped ? 'reaped' : 'unproven' }),
+      const launchedHandles = cleanup?.launchedHandles
+      const terminalCleanup = cleanup?.terminalCleanup
+      if (!Array.isArray(launchedHandles) || !Array.isArray(terminalCleanup) || launchedHandles.length !== terminalCleanup.length) {
+        throw new Error('external owner cleanup launch ledger is incomplete')
+      }
+      const groups = terminalCleanup.flatMap(handle => [
+        Object.freeze({ handleId: handle.handleId, owner: 'guardian', pid: handle.cleanup.guardian.pid, pgid: null,
+          exit: handle.cleanup.guardian.exit, result: 'exited' }),
+        Object.freeze({ handleId: handle.handleId, owner: 'qwen', pid: handle.cleanup.qwen.pid, pgid: handle.cleanup.qwen.pgid,
+          exit: handle.cleanup.qwen.exit, result: handle.cleanup.processGroupReaped ? 'reaped' : 'unproven' }),
       ])
-      if (!Array.isArray(groups) || groups.some(row => row.owner === 'qwen' && row.result !== 'reaped')) throw new Error('external owner cleanup result is incomplete')
-      return Object.freeze({ schema: 'g9-b5-external-owner-cleanup/v1', groups: Object.freeze(groups), shutdownSucceeded: true })
+      const expectedIds = new Set(launchedHandles.map(handle => handle.handleId))
+      if (expectedIds.size !== launchedHandles.length || groups.length !== launchedHandles.length * 2
+        || groups.some(row => !expectedIds.has(row.handleId) || (row.owner === 'qwen' && row.result !== 'reaped'))
+        || new Set(groups.map(row => `${row.handleId}:${row.owner}`)).size !== groups.length) {
+        throw new Error('external owner cleanup result is incomplete')
+      }
+      return Object.freeze({ schema: 'g9-b5-external-owner-cleanup/v1', launchedHandles: Object.freeze(launchedHandles),
+        groups: Object.freeze(groups), shutdownSucceeded: true })
     })()),
   })
 }

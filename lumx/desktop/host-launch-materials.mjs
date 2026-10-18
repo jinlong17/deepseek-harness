@@ -132,11 +132,19 @@ export async function prepareLumxHostLaunch(input) {
     let consumed = false; let cleaned = false
     const materials = { anchors, dataHome, externalOwner, forkRoot, h1, input, nodePath, paths, payload, port, profile, relay, sourceRoot,
       async releaseReservation() { if (consumed) throw new Error('Host launch material was already consumed'); consumed = true; await releasePort() },
-      cleanup: async () => { if (cleaned) return undefined; cleaned = true; let externalCleanup
-        await releasePort().catch(() => {}); await relay?.dispose().catch(() => {})
-        try { externalCleanup = await externalOwner?.close() } catch {}
-        try { chmodSync(frozen, 0o700) } catch {}; rmSync(runtime, { recursive: true, force: true })
-        return externalCleanup === undefined ? undefined : Object.freeze({ externalCleanup }) } }
+      cleanup: async () => {
+        if (cleaned) return undefined
+        cleaned = true
+        const failures = []; let externalCleanup
+        try { await releasePort() } catch (error) { failures.push(error) }
+        try { await relay?.dispose() } catch (error) { failures.push(error) }
+        try { externalCleanup = await externalOwner?.close() } catch (error) { failures.push(error) }
+        try { chmodSync(frozen, 0o700) } catch (error) { failures.push(error) }
+        try { rmSync(runtime, { recursive: true, force: true }) } catch (error) { failures.push(error) }
+        if (failures.length === 1) throw failures[0]
+        if (failures.length > 1) throw new AggregateError(failures, 'Host launch material cleanup failed')
+        return externalCleanup === undefined ? undefined : Object.freeze({ externalCleanup })
+      } }
     return Object.freeze(materials)
   } catch (error) {
     await releasePort().catch(() => {}); await relay?.dispose().catch(() => {}); await externalOwner?.close().catch(() => {})

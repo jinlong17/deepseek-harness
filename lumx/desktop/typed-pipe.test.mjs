@@ -80,3 +80,28 @@ test('send waits for writable completion before resolving a shutdown response', 
   input.end(); await pipe.closed
   t.after(() => output.destroy())
 })
+
+
+test('close waits for an in-flight write callback and writable finish barrier', async () => {
+  const input = new PassThrough(); let releaseWrite; let releaseFinal; let finalStarted = false
+  const output = new Writable({
+    write(_chunk, _encoding, callback) { releaseWrite = callback },
+    final(callback) { finalStarted = true; releaseFinal = callback },
+  })
+  const pipe = createTypedPipe({ readable: input, writable: output, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor', generation: 'generation-123456', onFrame() {} })
+  const sent = pipe.send({ channel: 'control', type: 'response', requestId: 'shutdown', payload: { ok: true } })
+  await new Promise(resolve => setImmediate(resolve))
+  let closed = false
+  const closing = pipe.close().then(() => { closed = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(closed, false)
+  assert.equal(finalStarted, false)
+  releaseWrite()
+  await sent
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(finalStarted, true)
+  assert.equal(closed, false)
+  releaseFinal()
+  await closing
+  assert.equal(closed, true)
+})

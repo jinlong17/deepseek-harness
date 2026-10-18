@@ -72,6 +72,7 @@ function signalName(number) {
 /** Supervisor-owned official ACP client and Qwen process-group lifecycle. */
 export function createSupervisedQwenEngine({ materials, relay, model, mcpServers = [], onUpdate = () => {}, onPermission = async () => ({ outcome: { outcome: 'cancelled' } }) }) {
   const handles = new Map(); const reservations = new Set(); const servers = fixedServers(mcpServers)
+  const launched = new Map(); const terminal = new Map()
   let accepting = true; let launches = 0; let closing
 
   function assertActive(record, signal) {
@@ -81,8 +82,18 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
   }
   function reserve(handleId) {
     if (!accepting) throw new Error('Qwen engine is disposed')
-    if (handles.has(handleId) || reservations.has(handleId)) throw new Error('Qwen handle already exists')
+    if (handles.has(handleId) || reservations.has(handleId) || launched.has(handleId)) throw new Error('Qwen handle already exists')
     reservations.add(handleId)
+  }
+  function terminalFailure(record, error) {
+    terminal.set(record.handleId, Object.freeze({ birth: record.birth, handleId: record.handleId,
+      guardianPid: record.guardian.pid, qwenPid: record.qwenPid,
+      state: 'cleanup-failed', error: String(error?.message ?? error) }))
+  }
+  function terminalSuccess(record, cleanup) {
+    if (!Number.isSafeInteger(record.qwenPid)) throw new Error('Qwen cleanup has no owned engine PID')
+    terminal.set(record.handleId, Object.freeze({ birth: record.birth, handleId: record.handleId,
+      guardianPid: record.guardian.pid, qwenPid: record.qwenPid, state: 'reaped', cleanup }))
   }
   function callback(prompt, operation, fallback) {
     if (!prompt.accepting) return Promise.resolve(fallback)
@@ -107,10 +118,12 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
       if (guardianResult === undefined) { record.guardian.kill('SIGKILL'); guardianResult = await timeout(record.guardianExited, 'Qwen guardian reap', 2_000) }
       if (guardianResult.code !== 0 || guardianResult.signal !== null) throw new Error('Qwen guardian failed to prove complete process-group cleanup')
       const qwenResult = await timeout(record.qwenExit, 'Qwen exit report', 1_000)
+      const cleanup = Object.freeze({ guardian: Object.freeze({ pid: record.guardian.pid, exit: guardianResult }),
+        qwen: Object.freeze({ pid: record.qwenPid, pgid: record.qwenPid, exit: { code: qwenResult.code, signal: signalName(qwenResult.signal) } }),
+        processGroupReaped: true })
+      terminalSuccess(record, cleanup)
       return { exit: { code: qwenResult.code, signal: signalName(qwenResult.signal) }, guardianExit: guardianResult,
-        cleanup: Object.freeze({ guardian: Object.freeze({ pid: record.guardian.pid, exit: guardianResult }),
-          qwen: Object.freeze({ pid: record.qwenPid, pgid: record.qwenPid, exit: { code: qwenResult.code, signal: signalName(qwenResult.signal) } }),
-          processGroupReaped: true }), stderr: record.qwenDiagnostic(), guardianError: record.guardianDiagnostic(), permissions: record.permissions, updates: record.updates }
+        cleanup, stderr: record.qwenDiagnostic(), guardianError: record.guardianDiagnostic(), permissions: record.permissions, updates: record.updates }
     })())
   }
 
@@ -129,10 +142,12 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
       QWEN_TELEMETRY_ENABLED: '0', QWEN_USAGE_STATISTICS_ENABLED: '0', TMPDIR: materials.paths.tmp }
     const guardian = spawn(materials.paths.guardian, qwenArgv, { cwd: materials.paths.workspace, env, stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'] })
     const guardianExited = outcome(guardian); guardian.once('error', () => {})
+    const birth = launches
+    launched.set(handleId, Object.freeze({ birth, handleId, guardianPid: guardian.pid }))
     const control = guardianControl(guardian.stdout); const guardianDiagnostic = captureBoundedTail(guardian.stderr)
     const qwenInput = guardian.stdio[3]; const qwenOutput = guardian.stdio[4]; const qwenError = guardian.stdio[5]
     const qwenDiagnostic = captureBoundedTail(qwenError); const boundedOutput = createBoundedNdjsonInput(); qwenOutput.pipe(boundedOutput)
-    const record = { handleId, guardian, guardianExited, guardianDiagnostic, phase: 'starting', qwenDiagnostic, qwenExit: control.exited, qwenPid: undefined,
+    const record = { birth, handleId, guardian, guardianExited, guardianDiagnostic, phase: 'starting', qwenDiagnostic, qwenExit: control.exited, qwenPid: undefined,
       nativeSessionId: undefined, prompt: undefined, updates: 0, permissions: 0, disposing: undefined, reaping: undefined,
       lifecycleAbort: new AbortController(), drainFailure: undefined, client: undefined }
     handles.set(handleId, record)
@@ -155,6 +170,7 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
       boundedOutput.once('error', () => { void dispose({ handleId }) })
       assertActive(record, signal); guardian.stdin.write('S')
       record.qwenPid = await abortable(timeout(control.pid, 'Qwen guarded spawn', 5_000), signal)
+      launched.set(handleId, Object.freeze({ birth, handleId, guardianPid: guardian.pid, qwenPid: record.qwenPid }))
       assertActive(record, signal)
       return record
     } catch (error) { await dispose({ handleId }).catch(() => {}); throw error }
@@ -274,7 +290,7 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
         }
         if (record.drainFailure !== undefined) failures.push(record.drainFailure)
         let result
-        try { result = await reap(record) } catch (error) { failures.push(error) }
+        try { result = await reap(record) } catch (error) { failures.push(error); terminalFailure(record, error) }
         const error = combined(failures, 'Qwen handle disposal failed')
         if (error !== undefined) throw error
         return result
@@ -285,10 +301,15 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
   function close() {
     return (closing ??= (async () => {
       accepting = false
+      if (reservations.size !== 0) throw new Error('Qwen engine close found pending create/load reservations')
       const results = await Promise.allSettled([...handles.values()].map(record => dispose({ handleId: record.handleId })))
-      await relay.dispose(); const failures = results.filter(result => result.status === 'rejected')
+      const failures = results.filter(result => result.status === 'rejected')
+      try { await relay.dispose() } catch (error) { failures.push({ reason: error }) }
       if (failures.length > 0) throw new AggregateError(failures.map(result => result.reason), 'Qwen engine teardown failed')
-      return Object.freeze({ handles: Object.freeze(results.map(result => result.value.cleanup)) })
+      const launchesLedger = [...launched.values()].sort((first, second) => first.birth - second.birth)
+      const terminalLedger = launchesLedger.map(row => terminal.get(row.handleId))
+      if (terminalLedger.some(row => row === undefined || row.state !== 'reaped')) throw new Error('Qwen engine teardown has incomplete launch cleanup history')
+      return Object.freeze({ launchedHandles: Object.freeze(launchesLedger), terminalCleanup: Object.freeze(terminalLedger) })
     })())
   }
 

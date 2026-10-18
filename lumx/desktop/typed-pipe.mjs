@@ -48,7 +48,7 @@ export function createTypedPipe({ readable, writable, incomingDirection, outgoin
   let incomingSeq = 0; let outgoingSeq = 0; let buffered = Buffer.alloc(0)
   let incomingBytes = 0; let outgoingBytes = 0; let incomingActive = false; let writing = false
   let ended = false; let closing = false; let failure
-  const writeAbort = new AbortController()
+  let finishOutput
   const incoming = []; const urgent = []; const ordinary = []
   const lifecycle = Promise.withResolvers()
 
@@ -67,8 +67,28 @@ export function createTypedPipe({ readable, writable, incomingDirection, outgoin
   lifecycle.promise.catch(() => {})
   function rejectAll(queue, error) { for (const item of queue.splice(0)) item.result.reject(error) }
   function maybeClosed() {
-    if (settled || failure !== undefined || !ended || incomingActive || incoming.length > 0 || writing || urgent.length > 0 || ordinary.length > 0) return
+    if (settled || failure !== undefined || !ended || incomingActive || incoming.length > 0 || writing || urgent.length > 0 || ordinary.length > 0 || !writable.writableFinished) return
     settled = true; lifecycle.resolve()
+  }
+
+  function finishWritable() {
+    if (finishOutput !== undefined) return finishOutput
+    finishOutput = new Promise((resolveEnd, rejectEnd) => {
+      if (writable.writableFinished || writable.destroyed) { resolveEnd(); return }
+      let settledEnd = false
+      const finish = error => {
+        if (settledEnd) return
+        settledEnd = true; clearTimeout(timer); writable.removeListener('error', onError); writable.removeListener('finish', onFinish)
+        if (error === undefined) resolveEnd(); else rejectEnd(error)
+      }
+      const onError = error => finish(error)
+      const onFinish = () => finish()
+      const timer = setTimeout(() => finish(new Error('LUMX typed pipe close completion timed out')), WRITE_DEADLINE_MS)
+      writable.once('error', onError); writable.once('finish', onFinish)
+      if (writable.writableEnded) return
+      try { writable.end() } catch (error) { finish(error) }
+    })
+    return finishOutput
   }
 
   async function drainIncoming() {
@@ -151,7 +171,13 @@ export function createTypedPipe({ readable, writable, incomingDirection, outgoin
           break
         }
       }
-    } finally { writing = false; maybeClosed() }
+    } finally {
+      writing = false
+      if (closing && failure === undefined) {
+        try { await finishWritable() } catch (error) { settleFailure(error) }
+      }
+      maybeClosed()
+    }
   }
 
   function send(frame, { priority = false } = {}) {
@@ -177,21 +203,9 @@ export function createTypedPipe({ readable, writable, incomingDirection, outgoin
   async function close() {
     if (settled) return lifecycle.promise
     closing = true; ended = true; readable.pause()
-    writeAbort.abort(new Error('LUMX typed pipe closed'))
     rejectAll(urgent, new Error('LUMX typed pipe closed')); rejectAll(ordinary, new Error('LUMX typed pipe closed'))
-    if (!writing && !writable.writableEnded) {
-      await new Promise((resolveEnd, rejectEnd) => {
-        let settledEnd = false
-        const finish = error => {
-          if (settledEnd) return
-          settledEnd = true; clearTimeout(timer); writable.removeListener('error', onError)
-          if (error === undefined) resolveEnd(); else rejectEnd(error)
-        }
-        const onError = error => finish(error)
-        const timer = setTimeout(() => finish(new Error('LUMX typed pipe close completion timed out')), WRITE_DEADLINE_MS)
-        writable.once('error', onError)
-        try { writable.end(finish) } catch (error) { finish(error) }
-      })
+    if (!writing) {
+      try { await finishWritable() } catch (error) { settleFailure(error); throw error }
     }
     maybeClosed()
     return lifecycle.promise
