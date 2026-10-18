@@ -56,6 +56,10 @@ function assertStrictPredicateRejects(facts, mutate) {
   const altered = copy(facts); mutate(altered)
   assert.equal(privacyLifecycleComplete(altered), false)
 }
+function assertShutdownRejects(facts, mutate) {
+  const altered = copy(facts); mutate(altered)
+  assert.equal(privacyShutdownComplete(altered), false)
+}
 
 test('privacy qualification keeps seven protected rows while exercising same-package child alias lifecycle', { timeout: 30_000 }, async t => {
   const value = await runtime(t)
@@ -130,28 +134,53 @@ test('privacy qualification keeps seven protected rows while exercising same-pac
   assertStrictPredicateRejects(facts, value => { value.governance.rows[0].specifier = 'cordis:timer' })
 })
 
-test('privacy shutdown facts require retained inactive rows and a completed empty root inventory', { timeout: 30_000 }, async t => {
+test('privacy shutdown facts retain only the terminal app bootstrap carrier after the protected subtree closes', { timeout: 30_000 }, async t => {
   const value = await runtime(t)
   const captured = capturePrivacyShutdownRows(value.ctx)
+  const premature = observePrivacyShutdownRows(captured, true)
+  assert.equal(premature.carrier.before.currentFiber.state, 2)
+  assert.equal(privacyShutdownComplete(premature), false)
   await value.shutdown()
   const facts = observePrivacyShutdownRows(captured, true)
   assert.deepEqual(facts.postInventoryIds, ['include'])
-  assert.equal(privacyShutdownComplete(facts), false)
-  const completed = copy(facts)
-  completed.postInventoryIds = []
-  assert.equal(privacyShutdownComplete(completed), true, JSON.stringify(completed))
+  assert.equal(facts.postInventory.length, 1)
+  assert.deepEqual(facts.postInventory[0], {
+    id: 'include', fullId: 'include', name: 'cordis:include', parentIsRoot: true, sameCapturedCarrier: true,
+    currentFiberRelation: 'same', currentFiber: { present: true, uid: null, state: 4, inertiaPresent: false, storePresent: false },
+  })
+  assert.deepEqual(facts.carrier.retainedFiber, { present: true, uid: null, state: 4, inertiaPresent: false, storePresent: false })
+  assert.equal(privacyShutdownComplete(facts), true, JSON.stringify(facts))
   assert.equal(facts.rows.length, 7)
   assert.ok(facts.rows.every(row => row.sameEntryAfterShutdown === false && row.postInventoryPresent === false && row.postDisabled === true && row.postFiberPresent === false))
-  for (const mutate of [
-    value => { value.runtimeShutdownCompleted = false },
-    value => { value.postInventoryIds.push('unexpected') },
-    value => { value.rows.pop() },
-    value => { value.rows[0].retainedName = 'cordis:timer' },
-    value => { value.rows[0].postFiberPresent = true },
-  ]) {
-    const altered = copy(completed); mutate(altered)
-    assert.equal(privacyShutdownComplete(altered), false)
-  }
+  for (const mutate of [value => { value.runtimeShutdownCompleted = false }, value => { value.postInventoryIds.push('unexpected') },
+    value => { const row = { ...value.postInventory[0], id: 'unexpected', fullId: 'unexpected', sameCapturedCarrier: false }; value.postInventory.push(row); value.postInventoryIds.push(row.id) },
+    value => { const row = structuredClone(value.postInventory[0]); value.postInventory.push(row); value.postInventoryIds.push(row.id) },
+    value => { const row = { ...value.postInventory[0], id: 'session-log-deepseek', fullId: 'include:session-log-deepseek', sameCapturedCarrier: false }; value.postInventory.push(row); value.postInventoryIds.push(row.id) },
+    value => { value.postInventory[0].id = 'session-log-deepseek' }, value => { value.postInventory[0].fullId = 'include:renamed' },
+    value => { value.postInventory[0].name = 'cordis:group' },
+    value => { value.postInventory[0].parentIsRoot = false }, value => { value.postInventory[0].sameCapturedCarrier = false },
+    value => { value.postInventory[0].currentFiberRelation = 'replaced' }, value => { value.rows.pop() },
+    value => { value.rows[0].retainedName = 'cordis:timer' }, value => { value.rows[0].postFiberPresent = true },
+    value => { value.carrier.before.sameCapturedCarrier = false }, value => { value.carrier.before.currentFiberRelation = 'replaced' },
+    value => { delete value.carrier.retainedFiber }, value => { value.carrier.retainedFiber.uid = 1 },
+    ...[0, 1, 2, 3, 5].map(state => value => { value.carrier.retainedFiber.state = state }),
+    value => { value.carrier.retainedFiber.inertiaPresent = true }, value => { value.carrier.retainedFiber.storePresent = true },
+    value => { value.postInventory[0].currentFiber.state = 2 }, value => { value.postInventory[0].currentFiber.inertiaPresent = true },
+    value => { value.postInventory[0].currentFiber.storePresent = true },
+  ]) assertShutdownRejects(facts, mutate)
+
+  const carrierRemoved = copy(facts)
+  carrierRemoved.postInventory = []; carrierRemoved.postInventoryIds = []
+  assert.equal(privacyShutdownComplete(carrierRemoved), true)
+  const clearedReference = copy(facts)
+  clearedReference.postInventory[0].currentFiberRelation = 'absent'
+  clearedReference.postInventory[0].currentFiber = { present: false, uid: null, state: null, inertiaPresent: false, storePresent: false }
+  assert.equal(privacyShutdownComplete(clearedReference), true)
+  const clearedReferenceWithLiveRetainedFiber = copy(facts)
+  clearedReferenceWithLiveRetainedFiber.postInventory[0].currentFiberRelation = 'absent'
+  clearedReferenceWithLiveRetainedFiber.postInventory[0].currentFiber = { present: false, uid: null, state: null, inertiaPresent: false, storePresent: false }
+  clearedReferenceWithLiveRetainedFiber.carrier.retainedFiber.state = 2
+  assert.equal(privacyShutdownComplete(clearedReferenceWithLiveRetainedFiber), false)
 })
 
 test('privacy qualification rejects a collision on its fixed group ID', { timeout: 30_000 }, async t => {

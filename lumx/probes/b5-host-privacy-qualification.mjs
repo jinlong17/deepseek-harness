@@ -11,6 +11,10 @@ export const PRIVACY_IDS = Object.freeze(Object.keys(PRIVACY_PACKAGES))
 const LATE_ID = 'product-analytics'
 const ALIAS_PREFIX = 'lumx-b5-privacy-alias-'
 export const PRIVACY_ALIAS_GROUP_ID = `${ALIAS_PREFIX}group`
+const ROOT_CARRIER_ID = 'include'
+const ROOT_CARRIER_NAME = 'cordis:include'
+const FIBER_ACTIVE = 2
+const FIBER_DISPOSED = 4
 function error(error) { return { code: error?.code, message: error instanceof Error ? error.message : String(error), name: error?.name ?? 'Error' } }
 function aliasId(id) { return `${ALIAS_PREFIX}${id}` }
 function entryFor(ctx, id) { return [...ctx.loader.entries()].find(candidate => candidate.options.id === id) }
@@ -59,6 +63,16 @@ function exactCoverage(rows, ids, key = row => row.id) {
 }
 function sameOptions(before, after) {
   return before?.optionsFingerprint !== undefined && before.optionsFingerprint === after?.optionsFingerprint
+}
+function fiberState(fiber) {
+  return { present: fiber !== undefined, uid: fiber?.uid ?? null, state: fiber?.state ?? null,
+    inertiaPresent: fiber?.inertia !== undefined, storePresent: fiber?.store !== undefined }
+}
+function carrierRow(entry, loader, carrier, fiber) {
+  const currentFiber = entry.fiber
+  return { id: entry.options.id, fullId: entry.id, name: entry.options.name, parentIsRoot: entry.parent === loader.root,
+    sameCapturedCarrier: entry === carrier, currentFiberRelation: currentFiber === undefined ? 'absent' : currentFiber === fiber ? 'same' : 'replaced',
+    currentFiber: fiberState(currentFiber) }
 }
 function matchingInactiveState(state, id, identity, packageName = PRIVACY_PACKAGES[id]) {
   return state?.id === id && state.package === packageName && sameIdentity(identity, state.identity) && inactive(state)
@@ -227,16 +241,25 @@ async function childAliasActions(ctx, protectedActions) {
 }
 export function capturePrivacyShutdownRows(ctx) {
   const loader = ctx.loader; const entries = [...loader.entries()]
+  const carriers = entries.filter(entry => entry.options.id === ROOT_CARRIER_ID || entry.id === ROOT_CARRIER_ID)
+  if (carriers.length !== 1) throw new Error('privacy shutdown root carrier is absent or ambiguous')
+  const carrier = carriers[0]; const carrierFiber = carrier.fiber
+  const carrierBefore = carrierRow(carrier, loader, carrier, carrierFiber)
+  if (carrierBefore.id !== ROOT_CARRIER_ID || carrierBefore.fullId !== ROOT_CARRIER_ID || carrierBefore.name !== ROOT_CARRIER_NAME
+    || carrierBefore.parentIsRoot !== true || carrierBefore.currentFiber.present !== true
+    || carrierBefore.currentFiber.state !== FIBER_ACTIVE || carrierBefore.currentFiber.uid === null) {
+    throw new Error('privacy shutdown root carrier is not the active app bootstrap')
+  }
   const rows = PRIVACY_IDS.map(id => {
     const entry = entries.find(candidate => candidate.options.id === id)
     const resolution = entry === undefined ? undefined : entry.loader.resolveEntry(entry.options.name, entry.parent.tree.ctx.baseUrl)
     return entry === undefined ? { id, entry: undefined, before: { resolved: false } } : { id, entry,
       before: rowState(entry), identity: identityFromResolution(resolution) }
   })
-  return Object.freeze({ loader, rows: Object.freeze(rows) })
+  return Object.freeze({ carrier: Object.freeze({ before: Object.freeze(carrierBefore), entry: carrier, fiber: carrierFiber }), loader, rows: Object.freeze(rows) })
 }
 export function observePrivacyShutdownRows(captured, runtimeShutdownCompleted) {
-  if (captured?.loader === undefined || !Array.isArray(captured.rows)) throw new Error('privacy shutdown capture is invalid')
+  if (captured?.loader === undefined || !Array.isArray(captured.rows) || captured.carrier?.entry === undefined || captured.carrier?.fiber === undefined) throw new Error('privacy shutdown capture is invalid')
   const current = [...captured.loader.entries()]
   const rows = captured.rows.map(row => {
     const entry = current.find(candidate => candidate.options.id === row.id)
@@ -249,11 +272,28 @@ export function observePrivacyShutdownRows(captured, runtimeShutdownCompleted) {
       retainedName, retainedId, retainedIdentity: row.identity,
       retainedIdentityUnchanged: retainedId === row.id && retainedName === row.before?.package && sameIdentity(row.before?.identity, row.identity) }
   })
-  return Object.freeze({ runtimeShutdownCompleted, postInventoryIds: Object.freeze(current.map(entry => entry.options.id)), rows: Object.freeze(rows) })
+  const postInventory = current.map(entry => carrierRow(entry, captured.loader, captured.carrier.entry, captured.carrier.fiber))
+  return Object.freeze({ carrier: Object.freeze({ before: captured.carrier.before, retainedFiber: Object.freeze(fiberState(captured.carrier.fiber)) }),
+    runtimeShutdownCompleted, postInventory: Object.freeze(postInventory), postInventoryIds: Object.freeze(postInventory.map(entry => entry.id)), rows: Object.freeze(rows) })
 }
 export function privacyShutdownComplete(facts) {
-  if (facts?.runtimeShutdownCompleted !== true || !Array.isArray(facts.postInventoryIds) || facts.postInventoryIds.length !== 0
-    || !exactCoverage(facts.rows, PRIVACY_IDS)) return false
+  const before = facts?.carrier?.before; const retainedFiber = facts?.carrier?.retainedFiber; const inventory = facts?.postInventory
+  if (facts?.runtimeShutdownCompleted !== true || !Array.isArray(facts.postInventoryIds) || !Array.isArray(inventory)
+    || JSON.stringify(facts.postInventoryIds) !== JSON.stringify(inventory.map(row => row.id)) || !exactCoverage(facts.rows, PRIVACY_IDS)
+    || before?.id !== ROOT_CARRIER_ID || before.fullId !== ROOT_CARRIER_ID || before.name !== ROOT_CARRIER_NAME || before.parentIsRoot !== true
+    || before.sameCapturedCarrier !== true || before.currentFiberRelation !== 'same'
+    || before.currentFiber?.present !== true || before.currentFiber.state !== FIBER_ACTIVE || before.currentFiber.uid === null
+    || retainedFiber?.present !== true || retainedFiber.uid !== null || retainedFiber.state !== FIBER_DISPOSED
+    || retainedFiber.inertiaPresent !== false || retainedFiber.storePresent !== false || inventory.length > 1) return false
+  if (inventory.length === 1) {
+    const carrier = inventory[0]
+    if (carrier.id !== ROOT_CARRIER_ID || carrier.fullId !== ROOT_CARRIER_ID || carrier.name !== ROOT_CARRIER_NAME
+      || carrier.parentIsRoot !== true || carrier.sameCapturedCarrier !== true || !['absent', 'same'].includes(carrier.currentFiberRelation)
+      || (carrier.currentFiberRelation === 'absent' && carrier.currentFiber?.present !== false)
+      || (carrier.currentFiberRelation === 'same' && (carrier.currentFiber?.present !== true || carrier.currentFiber.uid !== null
+        || carrier.currentFiber.state !== FIBER_DISPOSED || carrier.currentFiber.inertiaPresent !== false
+        || carrier.currentFiber.storePresent !== false))) return false
+  }
   return facts.rows.every(row => row.before?.resolved === true && row.before.disabled === true && row.before.fiberPresent === false
     && row.before.unevaluated === true && realIdentity(row.before.identity) && sameIdentity(row.before.identity, row.retainedIdentity)
     && row.retainedId === row.id && row.retainedName === row.before.package && row.retainedIdentityUnchanged === true
