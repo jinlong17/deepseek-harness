@@ -5,7 +5,7 @@ const MAX_COMPLETED = 4096
 const MAX_EVENTS = 256
 const REQUEST_TIMEOUT_MS = 60_000
 const CLOSE_TIMEOUT_MS = 1_000
-const OPERATIONS = new Set(['create', 'load', 'permission', 'prompt'])
+const OPERATIONS = new Set(['cancel', 'create', 'dispose', 'load', 'permission', 'prompt'])
 
 function record(value, label) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`)
@@ -99,13 +99,13 @@ export function createEngineRpcPeer({ pipe, handlers = {}, onEvent = () => {} })
     if (frame.type === 'cancel') {
       const promptId = identifier(frame.promptId, 'promptId')
       for (const active of incoming.values()) if (active.promptId === promptId && active.handleId === frame.handleId) active.controller.abort(new Error('engine prompt cancelled'))
-      trackControl(Promise.resolve(handlers.cancel?.({ handleId: frame.handleId, promptId })))
+      trackControl(Promise.resolve(handlers.cancel?.({}, { handleId: frame.handleId, promptId })))
       return true
     }
     if (frame.type === 'dispose') {
       const handleId = identifier(frame.handleId, 'handleId')
       for (const active of incoming.values()) if (active.handleId === handleId) active.controller.abort(new Error('engine handle disposed'))
-      trackControl(Promise.resolve(handlers.dispose?.({ handleId })))
+      trackControl(Promise.resolve(handlers.dispose?.({}, { handleId })))
       return true
     }
     if (frame.type !== 'request') throw new Error('engine RPC frame type is invalid')

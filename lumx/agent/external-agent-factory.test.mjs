@@ -173,3 +173,26 @@ test('a late permission approval after turn cancellation cannot authorize work',
   assert.deepEqual(permission, { outcome: { outcome: 'cancelled' } })
   await handle.dispose(); assert.equal(engine.calls.dispose, 1)
 })
+
+test('cancel quiescence waits for remote prompt drain while another Agent remains usable', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-cancel-drain-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const engine = fakeEngine(); const entered = Promise.withResolvers(); const cancelEntered = Promise.withResolvers(); const cancelRelease = Promise.withResolvers()
+  engine.prompt = async (_input, { handleId, promptId, signal }) => {
+    engine.calls.prompt += 1
+    if (engine.calls.prompt === 1) {
+      entered.resolve()
+      await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+      return
+    }
+    await engine.router.onUpdate({ handleId, promptId, params: { sessionId: 'native-2', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'other handle remains usable' } } } })
+    return { result: { stopReason: 'end_turn' } }
+  }
+  engine.cancel = async () => { cancelEntered.resolve(); await cancelRelease.promise }
+  const { ctx } = await runtime(t, engine, root)
+  const first = await ctx.agents.create({ sessionId: 'first-handle' }); const second = await ctx.agents.create({ sessionId: 'second-handle' })
+  first.agent.followup(user()); await entered.promise; first.agent.cancel({ kind: 'caller' }); await cancelEntered.promise
+  let idle = false; const waiting = first.agent.whenIdle().finally(() => { idle = true }); await new Promise(resolve => setImmediate(resolve)); assert.equal(idle, false)
+  second.agent.followup(user()); await second.agent.whenIdle(); assert.equal(second.agent.status, 'idle')
+  cancelRelease.resolve(); await assert.rejects(waiting); assert.equal(idle, true)
+  await first.dispose(); await second.dispose(); assert.equal(engine.calls.dispose, 2)
+})

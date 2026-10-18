@@ -56,6 +56,22 @@ test('a blocked prompt does not block permission roundtrip or cancellation', asy
   assert.deepEqual(p.host.stats(), { abandoned: 0, completed: 1, controls: 0, events: 0, incoming: 0, outgoing: 0 })
 })
 
+test('correlated cancel and dispose requests acknowledge remote settlement', async t => {
+  const cancelEntered = deferred(); const cancelRelease = deferred()
+  const disposeEntered = deferred(); const disposeRelease = deferred()
+  const p = peers({ host: {}, supervisor: {
+    cancel: async (_input, ids) => { assert.equal(ids.handleId, 'handle-1'); assert.equal(ids.promptId, 'prompt-1'); cancelEntered.resolve(); await cancelRelease.promise },
+    dispose: async (_input, ids) => { assert.equal(ids.handleId, 'handle-1'); disposeEntered.resolve(); await disposeRelease.promise },
+  } })
+  t.after(p.close)
+  let cancelled = false; const cancelling = p.host.request('cancel', {}, { handleId: 'handle-1', promptId: 'prompt-1' }).then(() => { cancelled = true })
+  await cancelEntered.promise; await new Promise(resolve => setImmediate(resolve)); assert.equal(cancelled, false)
+  cancelRelease.resolve(); await cancelling
+  let disposed = false; const disposing = p.host.request('dispose', {}, { handleId: 'handle-1' }).then(() => { disposed = true })
+  await disposeEntered.promise; await new Promise(resolve => setImmediate(resolve)); assert.equal(disposed, false)
+  disposeRelease.resolve(); await disposing
+})
+
 test('rejects unknown responses and bounds operation names', async t => {
   const p = peers({ host: {}, supervisor: { create: async () => ({ nativeSessionId: 'n1' }) } })
   t.after(p.close)

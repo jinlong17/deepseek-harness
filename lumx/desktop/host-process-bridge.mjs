@@ -17,7 +17,7 @@ export function createHostProcessBridge({ child, engine, generation }) {
   const acpBytes = createAcpByteTransport(pipe)
   rpc = createEngineRpcPeer({ pipe, handlers: {
     create: (input, ids) => engine.create(input, ids), load: (input, ids) => engine.load(input, ids),
-    prompt: (input, ids) => engine.prompt(input, ids), cancel: ids => engine.cancel(ids), dispose: ids => engine.dispose(ids),
+    prompt: (input, ids) => engine.prompt(input, ids), cancel: (_input, ids) => engine.cancel(ids), dispose: (_input, ids) => engine.dispose(ids),
   } })
   function fail(error) {
     if (!accepting) return; accepting = false; ready.reject(error)

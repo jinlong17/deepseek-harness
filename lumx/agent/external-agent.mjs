@@ -71,6 +71,8 @@ export class ExternalQwenAgent {
   #frameRevision = 0
   #maintenance
   #running
+  #controls = new Set()
+  #controlFailure
   #toolCalls = new Map()
 
   constructor({ ctx, engine, flush, handleId, id, model, nativeSessionId, options, parentAgent, provider, session }) {
@@ -92,16 +94,18 @@ export class ExternalQwenAgent {
   cancel(cause, options = {}) {
     if (!options.keepInbox) this.inbox.clear()
     const promptId = this.#running?.promptId; this.#abort?.abort(cause)
-    if (promptId !== undefined) void this.engine.cancel({ handleId: this.handleId, promptId }).catch(() => {})
+    if (promptId !== undefined) this.#trackControl(this.engine.cancel({ handleId: this.handleId, promptId }))
   }
   async whenIdle() {
     const failures = []
     for (;;) {
-      const work = this.#running?.done ?? this.#maintenance
-      try { await Promise.all([work].filter(Boolean)) } catch (error) { failures.push(error) }
-      if (this.#running !== undefined || this.#maintenance !== undefined) continue
+      const work = [this.#running?.done, this.#maintenance].filter(Boolean)
+      try { await Promise.all(work) } catch (error) { failures.push(error) }
+      await Promise.allSettled([...this.#controls])
+      if (this.#running !== undefined || this.#maintenance !== undefined || this.#controls.size > 0) continue
+      if (this.#controlFailure !== undefined) { failures.push(this.#controlFailure); this.#controlFailure = undefined }
       try { await this.flush() } catch (error) { failures.push(error) }
-      if (this.#running === undefined && this.#maintenance === undefined) break
+      if (this.#running === undefined && this.#maintenance === undefined && this.#controls.size === 0) break
     }
     if (failures.length === 1) throw failures[0]
     if (failures.length > 1) throw new AggregateError(failures, 'external Agent quiescence failed')
@@ -138,6 +142,10 @@ export class ExternalQwenAgent {
   }
 
   #assertLive() { if (this.#disposed) throw new Error(`external agent "${this.id}" is disposed`) }
+  #trackControl(operation) {
+    const task = Promise.resolve(operation); this.#controls.add(task)
+    task.catch(error => { this.#controlFailure ??= error }).finally(() => this.#controls.delete(task))
+  }
   #wake() {
     if (!this.#active || this.#disposed || this.#running !== undefined || this.#maintenance !== undefined) return
     const running = { done: undefined, promptId: undefined, attempt: undefined }; this.#running = running

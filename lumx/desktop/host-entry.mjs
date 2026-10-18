@@ -35,7 +35,8 @@ const acp = createAcpByteTransport(pipe)
 const remoteEngine = Object.freeze({
   create: (value, options) => rpc.request('create', value, options),
   load: (value, options) => rpc.request('load', value, options), prompt: (value, options) => rpc.request('prompt', value, options),
-  cancel: value => rpc.cancel(value.handleId, value.promptId), dispose: value => rpc.dispose(value.handleId),
+  cancel: value => rpc.request('cancel', {}, { handleId: value.handleId, promptId: value.promptId }),
+  dispose: value => rpc.request('dispose', {}, { handleId: value.handleId }),
 })
 rpc = createEngineRpcPeer({ pipe, handlers: { permission: (params, ids) => runtime.external.router.onPermission({ handleId: ids.handleId, promptId: ids.promptId, params }) },
   onEvent(frame) { if (frame.payload.type !== 'update') throw new Error('Host received an unsupported engine event'); return runtime.external.router.onUpdate({ handleId: frame.handleId, promptId: frame.promptId, params: frame.payload.value }) } })

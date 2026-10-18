@@ -164,7 +164,8 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
     if (record === undefined) throw new Error('Qwen handle is not active')
     assertActive(record, context.signal)
     if (record.nativeSessionId === undefined || record.prompt !== undefined) throw new Error('Qwen handle is not ready for a prompt')
-    const promptId = id(context.promptId, 'promptId'); const prompt = { id: promptId, signal: context.signal }; record.prompt = prompt
+    const promptId = id(context.promptId, 'promptId'); const done = Promise.withResolvers()
+    const prompt = { id: promptId, signal: context.signal, done }; record.prompt = prompt
     try { await relay.admit('prompt', context.signal); assertActive(record, context.signal); if (record.prompt !== prompt) throw new Error('Qwen prompt reservation was revoked') }
     catch (error) { if (record.prompt === prompt) record.prompt = undefined; throw error }
     const abort = () => { void record.client.cancel({ sessionId: record.nativeSessionId }).catch(() => {}) }
@@ -178,13 +179,22 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
         catch { await dispose({ handleId }) }
         throw error
       }
-    } finally { context.signal.removeEventListener('abort', abort); if (record.prompt === prompt) record.prompt = undefined; if (handles.get(record.handleId) === record && record.disposing === undefined) record.phase = 'ready' }
+    } finally { context.signal.removeEventListener('abort', abort); if (record.prompt === prompt) record.prompt = undefined; done.resolve(); if (handles.get(record.handleId) === record && record.disposing === undefined) record.phase = 'ready' }
   }
 
   async function cancel({ handleId, promptId }) {
     if (!accepting) throw new Error('Qwen engine is disposed')
     const record = handles.get(id(handleId, 'handleId')); const expected = id(promptId, 'promptId')
-    if (record?.nativeSessionId !== undefined && record.prompt?.id === expected) await record.client.cancel({ sessionId: record.nativeSessionId })
+    if (record?.nativeSessionId !== undefined && record.prompt?.id === expected) {
+      const prompt = record.prompt
+      try {
+        await timeout(record.client.cancel({ sessionId: record.nativeSessionId }), 'Qwen cancel request', 5_000)
+        await timeout(prompt.done.promise, 'Qwen cancelled prompt drain', 5_000)
+      } catch (error) {
+        await dispose({ handleId })
+        throw error
+      }
+    }
   }
 
   function dispose({ handleId }) {
