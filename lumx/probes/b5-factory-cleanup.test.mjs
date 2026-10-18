@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { closeSync, openSync, realpathSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createConnection } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -11,6 +12,7 @@ import { spawn } from 'node:child_process'
 
 import { closeB5HostOwners, withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
 import { desktopStub, h1Stubs, qwenStub } from './b5-fixed-stubs.mjs'
+import { settleB5FdDirectChild } from './b5-host-fd-direct-control.mjs'
 import { listen, qualificationFacts } from './b5-hook-common.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -27,7 +29,7 @@ function runNode(script, args = [], options = {}) {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(node, [script, ...args], { cwd: root, stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'] })
     const stdout = []; const stderr = []
-    const timer = setTimeout(() => { child.kill('SIGTERM'); rejectRun(new Error(`child timed out: ${script}`)) }, 5_000)
+    const timer = setTimeout(() => { child.kill('SIGTERM'); rejectRun(new Error(`child timed out: ${script}`)) }, options.timeoutMs ?? 5_000)
     child.stdout?.on('data', chunk => stdout.push(chunk))
     child.stderr?.on('data', chunk => stderr.push(chunk))
     child.once('error', error => { clearTimeout(timer); rejectRun(error) })
@@ -132,6 +134,76 @@ test('desktop stub accepts only the fixed POST provider route', async () => {
   } finally {
     await stub.close(); await closed(Number(endpoint.port))
   }
+})
+
+test('old-direct FD child settlement covers spawn failure, timeout, and immediate exit', async () => {
+  const missing = spawn(join(temp, 'missing-binary'), [], { stdio: 'ignore' })
+  await assert.rejects(settleB5FdDirectChild(missing, 100), /spawn failed/u)
+
+  const held = spawn(node, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  const heldResult = await settleB5FdDirectChild(held, 20)
+  assert.deepEqual(heldResult.actions, ['SIGTERM'])
+  assert.equal(heldResult.outcome.signal, 'SIGTERM')
+
+  const exited = spawn(node, ['-e', 'process.exit(0)'], { stdio: 'ignore' })
+  const exitedResult = await settleB5FdDirectChild(exited, 1_000)
+  assert.deepEqual(exitedResult.actions, [])
+  assert.deepEqual(exitedResult.outcome, { code: 0, signal: null })
+})
+
+test('old-direct FD positive uses inherited FD3 and never repairs it from the canary path', async () => {
+  const directory = join(temp, 'fd-direct-control'); await mkdir(directory, { recursive: true })
+  for (const value of ['home', 'runtime', 'workspace']) await mkdir(join(directory, value), { recursive: true })
+  const canaryPath = join(directory, 'canary'); const replacementPath = join(directory, 'replacement')
+  const profilePath = join(directory, 'profile.sb'); const childPath = join(directory, 'direct-child.mjs')
+  await writeFile(canaryPath, 'native-host-canary/v1:direct-control\n')
+  await writeFile(replacementPath, 'replacement-content\n')
+  await writeFile(profilePath, '(version 1)\n(allow default)\n')
+  const realProfilePath = realpathSync(profilePath)
+  const canaryStat = await (await import('node:fs/promises')).stat(canaryPath)
+  const canary = { path: canaryPath, dev: canaryStat.dev, ino: canaryStat.ino,
+    bytes: canaryStat.size, sha256: await sha256(canaryPath) }
+  const profileSha256 = await sha256(profilePath)
+  await writeFile(childPath, `import { runB5HostFdDirectControl } from ${JSON.stringify(pathToFileURL(modulePath('b5-host-fd-direct-control.mjs')).href)};
+const value = await runB5HostFdDirectControl(${JSON.stringify({ canary, config: { forkRoot: root, workspaceDirectory: join(directory, 'workspace'), osHome: join(directory, 'home'), runtimeParent: join(directory, 'runtime') }, host: { hostProfile: { path: realProfilePath, sha256: profileSha256 }, execution: { argv: ['/native', '-f', realProfilePath, node] } }, qualification: { host: { profileSha256 }, materials: [{ materialId: 'host-profile', role: 'host', sha256: profileSha256 }] } })});
+process.stdout.write(JSON.stringify(value));`)
+  for (const [label, inheritedPath, expectedCode] of [
+    ['actual-canary', canaryPath, 0],
+    ['replaced-fd3', replacementPath, 1],
+  ]) {
+    const inherited = openSync(inheritedPath, 'r')
+    try {
+      const value = await runNode(childPath, [], { stdio: ['ignore', 'pipe', 'pipe', inherited], timeoutMs: 10_000 })
+      assert.equal(value.code === 0 ? 0 : 1, expectedCode, `${label}: ${value.stderr}`)
+      if (expectedCode === 0) {
+        const result = JSON.parse(value.stdout)
+        assert.equal(result.inherited[0].identityMatched, true)
+        assert.equal(result.inherited[0].contentMatched, true)
+        assert.deepEqual(result.argv.slice(0, 6), ['/usr/bin/sandbox-exec', '-f', realProfilePath, node,
+          join(root, 'lumx/desktop/fd-observer.mjs'), '--child'])
+        assert.deepEqual(JSON.parse(result.argv[6]), { targets: [3], canary })
+      } else assert.match(value.stderr, /inherited canary/u)
+    } finally { closeSync(inherited) }
+  }
+})
+
+test('a controller-owned old-direct child dies with its controller process group', async () => {
+  const directory = join(temp, 'fd-controller-death'); await mkdir(directory, { recursive: true })
+  const script = join(directory, 'controller.mjs')
+  await writeFile(script, `import { spawn } from 'node:child_process';
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: false, stdio: 'ignore' });
+process.stdout.write(String(child.pid) + '\\n'); setInterval(() => {}, 1000);`)
+  const controller = spawn(node, [script], { cwd: root, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  const childPid = await new Promise((resolvePid, rejectPid) => {
+    let value = ''; const timer = setTimeout(() => rejectPid(new Error('controller child PID timeout')), 1_000)
+    controller.stdout.on('data', chunk => { value += chunk; if (value.includes('\n')) { clearTimeout(timer); resolvePid(Number(value.trim())) } })
+  })
+  process.kill(-controller.pid, 'SIGKILL')
+  await new Promise(resolveClose => controller.once('close', resolveClose))
+  const gone = pid => { try { process.kill(pid, 0); return false } catch (error) { return error.code === 'ESRCH' } }
+  for (let attempt = 0; attempt < 20 && !gone(childPid); attempt += 1) await new Promise(resolveWait => setTimeout(resolveWait, 25))
+  assert.equal(gone(controller.pid), true)
+  assert.equal(gone(childPid), true)
 })
 
 test('each B5 factory closes prepared loopback resources idempotently before Host launch', async () => {

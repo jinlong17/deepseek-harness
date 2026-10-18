@@ -81,11 +81,14 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
     cases.push(await attempt(host, 'expired', () => { identity.expiresAt = '2000-01-01T00:00:00.000Z' }))
     cases.push(await attempt(host, 'revoked', () => { gatewayState.active = false }))
     const byName = Object.fromEntries(cases.map(value => [value.name, value])); const zero = name => byName[name].modelRequests === 0 && !passed(byName[name].response)
-    const direct = await runB5HostFdDirectControl({ canary: fd.canary, config, host, qualification })
+    const direct = await runB5HostFdDirectControl({ canary: fdAdversarial.beforeLaunch.canary, config, host, qualification })
     const hostClosed = exactCoverage(host.fdObservation, targets, false); const childClosed = exactCoverage(host.childFdObservation?.observations, targets, false)
     const tokenChecks = [check('physical-network-denied', isolationFacts.denied === true, isolation),
       check('main-profile-path-denied', Object.keys(host.protectedPathErrors ?? {}).length > 0 && Object.values(host.protectedPathErrors).every(code => code !== 'READABLE'), host.protectedPathErrors),
-      check('inherited-fd-read-denied', hostClosed && childClosed && direct.observations[0].canaryRecovered === true, { attacker: fdAdversarial, direct, host: host.fdObservation, child: host.childFdObservation }),
+      check('inherited-fd-read-denied', hostClosed && childClosed && direct.childReaped === true
+        && direct.ownership === 'controller-process-group' && direct.observations[0].identityMatched === true
+        && direct.observations[0].contentMatched === true,
+      { attacker: fdAdversarial, direct, host: host.fdObservation, child: host.childFdObservation }),
       check('host-token-cookie-positive', page.status === 200, { page: page.status }), check('wrong-token-rejected', wrongToken.status === 401, { status: wrongToken.status }),
       check('wrong-origin-rejected', wrongOrigin.status === 403, wrongOrigin), check('wrong-host-rejected', wrongHost.status === 403, wrongHost), check('missing-origin-observed', Number.isSafeInteger(missingOrigin.status), missingOrigin)]
     const positiveChecks = [check('byok-positive-model-response', byName.positive.modelRequests === 1 && passed(byName.positive.response), byName.positive),
