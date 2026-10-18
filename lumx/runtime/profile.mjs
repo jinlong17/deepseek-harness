@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const PRIVACY_PATCH = fileURLToPath(new URL('./privacy.patch.yml', import.meta.url))
 const BYOK_PLUGIN = fileURLToPath(new URL('./byok-plugin.mjs', import.meta.url))
 const BUNDLES = Object.freeze(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
-const DESKTOP_CONSUMERS = Object.freeze(['desktop-byok', 'platform-stub'])
+const DESKTOP_CONSUMERS = Object.freeze(['desktop-byok', 'external-qwen', 'platform-stub'])
 
 function yamlString(value) {
   return JSON.stringify(value)
@@ -45,6 +45,7 @@ export async function createLumxRuntimeProfile(input) {
       `        runtimeId: ${yamlString(input.runtimeId)}`, `        sourceRoot: ${yamlString(input.sourceRoot)}`,
     )
   }
+  if (consumer === 'external-qwen') entries.push('- id: agent-loop', '  disabled: true', '- id: session-title-llm', '  disabled: true', '- id: agent-default-model', '  config:', '    provider: external-qwen', '    model: qwen3.7-max')
   entries.push('')
   await writeFile(runtimePatch, entries.join('\n'), { mode: 0o600 })
   return Object.freeze({

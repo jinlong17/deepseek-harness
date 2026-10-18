@@ -85,7 +85,7 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
 
   async function launch(handleId, signal) {
     assertActive(undefined, signal)
-    verifyQwenLaunch(materials, { requireInitialState: launches === 0 }); launches += 1
+    verifyQwenLaunch(materials, { requireInitialState: launches === 0 && materials.initialState }); launches += 1
     assertActive(undefined, signal)
     const qwenArgv = ['/usr/bin/sandbox-exec', '-f', materials.paths.profilePath, materials.nodePath, '--expose-gc', materials.qwenCliPath, '--acp', '--auth-type=openai']
     const env = { CI: '1', HOME: materials.paths.home, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', NO_COLOR: '1', NO_PROXY: '127.0.0.1,localhost',

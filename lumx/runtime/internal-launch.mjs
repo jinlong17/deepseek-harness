@@ -7,6 +7,7 @@ import { createLumxLaunchEnvironment } from '../desktop/launch-environment.mjs'
 import { installLumxByokRuntime } from './byok-plugin.mjs'
 import { createLumxRuntimeProfile } from './profile.mjs'
 import { installLumxGovernance } from './governance.mjs'
+import { installExternalQwenComposition } from './external-qwen-composition.mjs'
 
 let active = false
 
@@ -43,7 +44,7 @@ export async function launchLumxRuntimeInProcess(input) {
   }
   try {
     const consumer = input.consumer ?? 'desktop-byok'
-    if (consumer !== 'desktop-byok' && consumer !== 'platform-stub') throw new Error('LUMX product consumer is invalid')
+    if (!['desktop-byok', 'external-qwen', 'platform-stub'].includes(consumer)) throw new Error('LUMX product consumer is invalid')
     if (consumer === 'desktop-byok' && input.auth === undefined) throw new Error('desktop BYOK consumer requires launch-scoped admission')
     const launch = createLumxLaunchEnvironment(input)
     const runtimeId = randomUUID()
@@ -65,7 +66,8 @@ export async function launchLumxRuntimeInProcess(input) {
     const launchEnvironment = await import(sourceModule(input.sourceRoot, 'packages/util/launch-environment/lib/index.js'))
     const resolvedProfile = appBoot.loadProfileDirectory('LUMX Desktop', profile.profileDirectory, profile.installAnchor)
     appBoot.reportSkippedBundles('LUMX Desktop', resolvedProfile)
-    let governance
+    let governance; let external
+    const externalReady = Promise.withResolvers(); externalReady.promise.catch(() => {})
     running = await launcher.runProfile({
       environment: launchEnvironment.createLaunchEnvironmentSnapshot([
         { source: 'process', values: input.environment ?? {} },
@@ -73,11 +75,19 @@ export async function launchLumxRuntimeInProcess(input) {
       profile: profileName,
       resolvedProfile: { profile: resolvedProfile, installAnchor: profile.installAnchor },
       patchFiles: [profile.runtimePatch],
-      setup(hostCtx) {
+      async setup(hostCtx) {
         governance = installLumxGovernance(hostCtx)
+        if (consumer === 'external-qwen') {
+          if (input.external === undefined) throw new Error('external Qwen composition input is unavailable')
+          hostCtx.inject(['agents', 'llm', 'sessionPersistence', 'sessions'], injected => {
+            void installExternalQwenComposition(injected, { ...input.external, sourceRoot: input.sourceRoot })
+              .then(value => { external = value; externalReady.resolve(value) }, externalReady.reject)
+          })
+        }
       },
       args: ['--no-open', '--host', '127.0.0.1', '--port', String(input.port)],
     })
+    if (consumer === 'external-qwen') await externalReady.promise
     if (!governance) throw new Error('LUMX governance setup was not invoked')
     governance.assertReady()
     const port = running.ctx.webServer.port
@@ -85,7 +95,7 @@ export async function launchLumxRuntimeInProcess(input) {
     const readyUrl = running.ctx.connection.authenticatedUrl(baseUrl)
     let stopped
     const shutdown = () => stopped ??= (async () => {
-      try { await running.shutdown.shutdown(0) } finally {
+      try { await external?.close(); await running.shutdown.shutdown(0) } finally {
         cleanup()
       }
     })()
@@ -100,8 +110,10 @@ export async function launchLumxRuntimeInProcess(input) {
         id: row.id, specifier: row.specifier, url: row.resolution.url,
         format: row.resolution.format, generation: row.resolution.generation,
       })) }),
+      ...external === undefined ? {} : { external },
       readyUrl,
-      surface: consumer === 'desktop-byok' ? 'official-dsh-web-profile-shared-host' : 'local-platform-stub',
+      surface: consumer === 'platform-stub' ? 'local-platform-stub' : consumer === 'external-qwen'
+        ? 'official-dsh-web-acp-shared-host' : 'official-dsh-web-profile-shared-host',
       shutdown,
     })
   } catch (error) {

@@ -8,8 +8,8 @@ const WRITE_DEADLINE_MS = 5_000
 const CHANNELS = new Set(['acp', 'control', 'engine'])
 const DIRECTIONS = new Set(['host-to-supervisor', 'supervisor-to-host'])
 const TYPES = Object.freeze({
-  'host-to-supervisor': Object.freeze({ acp: new Set(['bytes', 'eof']), control: new Set(['command']), engine: new Set(['cancel', 'dispose', 'request', 'response']) }),
-  'supervisor-to-host': Object.freeze({ acp: new Set(['bytes', 'eof']), control: new Set(['event', 'ready', 'response']), engine: new Set(['event', 'request', 'response']) }),
+  'host-to-supervisor': Object.freeze({ acp: new Set(['bytes', 'eof']), control: new Set(['ready', 'response']), engine: new Set(['cancel', 'dispose', 'request', 'response']) }),
+  'supervisor-to-host': Object.freeze({ acp: new Set(['bytes', 'eof']), control: new Set(['command']), engine: new Set(['event', 'request', 'response']) }),
 })
 
 function exactObject(value, allowed) {

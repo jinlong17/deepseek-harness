@@ -3,12 +3,13 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 
 import { buildLumxNativeBootstrap } from './native/build.mjs'
 import { createLumxHostSandboxProfile } from './host-profile.mjs'
 import { createAcpModelRelay } from '../drivers/acp/model-relay.mjs'
+import { prepareExternalEngineOwner } from './external-engine-owner.mjs'
+import { createHostProcessBridge } from './host-process-bridge.mjs'
 
 const HOST_ENTRY = fileURLToPath(new URL('./host-entry.mjs', import.meta.url))
 const BOOT_FRAME = 'LUMX_BOOTSTRAP_V1\n'
@@ -31,7 +32,7 @@ function loopback(value, label) {
 }
 function hostConsumer(value) {
   const consumer = value ?? 'desktop-byok'
-  if (consumer !== 'desktop-byok' && consumer !== 'platform-stub') {
+  if (!['desktop-byok', 'external-qwen', 'platform-stub'].includes(consumer)) {
     throw new Error('Host product consumer is invalid')
   }
   return consumer
@@ -115,11 +116,14 @@ export async function launchLumxHost(input) {
     ? loopback(input.auth?.endpoint, 'model endpoint') : undefined
   let runtime
   let relay
+  let externalOwner
+  let bridge
   try {
     runtime = realpathSync(mkdtempSync(join(input.runtimeParent ?? tmpdir(), 'lumx-host-')))
-    const processHome = join(runtime, 'home'); const temporary = join(runtime, 'tmp')
+    const hostRuntime = join(runtime, 'host'); mkdirSync(hostRuntime, { mode: 0o700 })
+    const processHome = join(hostRuntime, 'home'); const temporary = join(hostRuntime, 'tmp')
     mkdirSync(processHome, { mode: 0o700 }); mkdirSync(temporary, { mode: 0o700 })
-    const bootstrap = buildLumxNativeBootstrap(join(runtime, 'lumx-bootstrap'))
+    const bootstrap = buildLumxNativeBootstrap(join(hostRuntime, 'lumx-bootstrap'))
     if (consumer === 'desktop-byok') {
       relay = await createAcpModelRelay({
         engineId: 'dsh-host', gateway: input.auth.gateway, getIdentity: input.auth.getIdentity,
@@ -127,24 +131,26 @@ export async function launchLumxHost(input) {
         providerKey: input.auth.byokKey, sessionId: input.launchId,
       })
     }
+    if (consumer === 'external-qwen') externalOwner = await prepareExternalEngineOwner({ ...input, runtime, nodePath, workspaceDirectory })
     const profile = createLumxHostSandboxProfile({
-      dataHome, forkRoot, nodePath, runtime, sourceRoot, workspaceDirectory,
+      dataHome, forkRoot, nodePath, runtime: hostRuntime, sourceRoot, workspaceDirectory,
       ports: [port, ...relay === undefined ? [] : [Number(new URL(relay.endpoint).port)]],
     })
-    const profilePath = join(runtime, 'lumx-host.sb')
+    const profilePath = join(hostRuntime, 'lumx-host.sb')
     writeFileSync(profilePath, profile, { mode: 0o600 })
     const payload = {
       consumer, mode: input.mode, osHome, workspaceDirectory,
-      sourceRoot, port, environment, nodePath,
+      sourceRoot, port, environment, nodePath, generation: randomUUID(),
       ...consumer === 'desktop-byok' ? {
         modelEndpoint: `${relay.endpoint}/chat/completions`, relayCapability: relay.capability,
       } : {},
+      ...consumer === 'external-qwen' ? { external: { artifactIdentity: externalOwner.artifactIdentity, engineId: externalOwner.engineId, model: externalOwner.model } } : {},
       fdTargets: input.fdQualification?.targets ?? [0, 3, 10, 11, 512],
       canary: input.fdQualification?.canary ?? { path: join(runtime, 'absent-canary'), dev: -1, ino: -1, bytes: 0, sha256: sha256('') },
       protectedPaths: input.fdQualification?.protectedPaths ?? [],
     }
-    const config = { version: 1, configSha256: sha256(Buffer.from(JSON.stringify(payload))), payload }
-    const configPath = join(runtime, 'host-config.json')
+    const config = { version: 2, configSha256: sha256(Buffer.from(JSON.stringify(payload))), payload }
+    const configPath = join(hostRuntime, 'host-config.json')
     writeFileSync(configPath, `${JSON.stringify(config)}\n`, { mode: 0o600 })
     const argv = [profilePath, nodePath, HOST_ENTRY, configPath]
     const child = spawn(bootstrap, ['/usr/bin/sandbox-exec', ...argv], {
@@ -154,28 +160,19 @@ export async function launchLumxHost(input) {
     })
     const exited = processExit(child)
     child.stdin.on('error', () => {})
-    let stderr = ''; const stdout = []
+    let stderr = ''
     let alive = true
-    child.stderr.setEncoding('utf8'); child.stderr.on('data', value => { stderr += value })
-    const pending = new Map()
+    child.stderr.setEncoding('utf8'); child.stderr.on('data', value => { stderr = `${stderr}${value}`.slice(-64 * 1024) })
     const ready = new Promise((resolveReady, rejectReady) => {
       child.once('error', rejectReady)
       child.once('exit', (code, signal) => {
         alive = false
         const error = new Error(`Host exited (${code ?? signal}): ${stderr}`)
         rejectReady(error)
-        for (const waiter of pending.values()) waiter.reject(error)
-        pending.clear()
       })
-      const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
-      lines.on('line', line => {
-        stdout.push(line)
-        try {
-          const value = JSON.parse(line)
-          if (value.type === 'ready') resolveReady(value)
-          if ((value.type === 'health' || value.type === 'inspect-session') && pending.has(value.id)) { pending.get(value.id).resolve(value); pending.delete(value.id) }
-        } catch {}
-      })
+      const unavailable = Object.freeze({ admit() { throw new Error('engine channel is unavailable') }, create() { throw new Error('engine channel is unavailable') }, load() { throw new Error('engine channel is unavailable') }, prompt() { throw new Error('engine channel is unavailable') }, cancel() {}, dispose() {} })
+      bridge = createHostProcessBridge({ child, engine: externalOwner?.engine ?? unavailable, generation: payload.generation })
+      bridge.ready.then(resolveReady, rejectReady)
     })
     child.stdin.write(BOOT_FRAME)
     let readyValue
@@ -190,14 +187,15 @@ export async function launchLumxHost(input) {
       if (Number.isSafeInteger(child.pid)) { try { process.kill(-child.pid, 'SIGKILL') } catch {} }
       await exited
       await relay?.dispose()
+      await externalOwner?.close().catch(() => {})
       rmSync(runtime, { recursive: true, force: true })
       throw error
     }
     let stopping
     const stop = command => (stopping ??= (async () => {
       try {
-        if (command !== undefined) child.stdin.write(`${command}\n`)
-        child.stdin.end()
+        if (command !== undefined) void bridge.request({ command }, 'Host shutdown').catch(() => {})
+        else await bridge.close().catch(() => {})
         let outcome = await Promise.race([exited, new Promise(resolveWait => setTimeout(() => resolveWait(undefined), 10_000))])
         if (outcome === undefined) {
           try { process.kill(-child.pid, 'SIGTERM') } catch {}
@@ -209,19 +207,18 @@ export async function launchLumxHost(input) {
         }
         return outcome
       } finally {
+        await bridge?.close().catch(() => {})
         await relay?.dispose().catch(() => {})
+        await externalOwner?.close().catch(() => {})
         rmSync(runtime, { recursive: true, force: true })
       }
     })())
-    const shutdown = () => stop('{"command":"shutdown"}')
+    const shutdown = () => stop('shutdown')
     const disconnect = () => stop(undefined)
     const requestControl = (command, timeoutLabel) => {
       if (stopping !== undefined) return Promise.reject(new Error('Host is shutting down'))
       if (!alive) return Promise.reject(new Error('Host process is not running'))
-      const id = randomUUID()
-      const response = new Promise((resolveResponse, rejectResponse) => pending.set(id, { resolve: resolveResponse, reject: rejectResponse }))
-      child.stdin.write(`${JSON.stringify({ ...command, id })}\n`)
-      return withTimeout(response, 30_000, timeoutLabel).finally(() => pending.delete(id))
+      return bridge.request(command, timeoutLabel).then(value => ({ type: command.command, status: 'pass', ...value }), error => ({ type: command.command, status: 'fail', error: error.message }))
     }
     const healthCheck = () => requestControl({ command: 'health' }, 'Host health check')
     const inspectSession = sessionId => /^[0-9a-f-]{36}$/u.test(sessionId)
@@ -237,10 +234,12 @@ export async function launchLumxHost(input) {
       execution: Object.freeze({ argv: Object.freeze([bootstrap, '/usr/bin/sandbox-exec', ...argv]), envKeys: Object.freeze(['HOME', 'LANG', 'LC_ALL', 'NO_COLOR', 'PATH', 'TMPDIR']) }),
       pid: child.pid, process: Object.freeze({ pid: child.pid }), readyUrl: readyValue.readyUrl,
       protectedPathErrors: readyValue.protectedPathErrors,
-      shutdown, stderr: () => stderr, stdout: () => [...stdout],
+      ...consumer === 'external-qwen' ? { acp: bridge.acp, external: Object.freeze({ artifactIdentity: externalOwner.artifactIdentity, engineId: externalOwner.engineId, model: externalOwner.model, observations: externalOwner.observations }) } : {},
+      shutdown, stderr: () => stderr, stdout: () => [],
     })
   } catch (error) {
     await relay?.dispose().catch(() => {})
+    await externalOwner?.close().catch(() => {})
     if (runtime !== undefined) rmSync(runtime, { recursive: true, force: true })
     throw error
   }

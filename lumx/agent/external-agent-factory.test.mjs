@@ -27,7 +27,7 @@ function fakeEngine() {
     async load({ nativeSessionId }) { calls.load += 1; return { nativeSessionId } },
     async prompt(_input, { handleId, promptId }) {
       calls.prompt += 1
-      await this.router.onUpdate({ handleId, promptId, params: { sessionId: 'native', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'external answer' } } } })
+      await this.router.onUpdate({ handleId, promptId, params: { sessionId: `native-${serial}`, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'external answer' } } } })
       return { result: { stopReason: 'end_turn' } }
     },
     async cancel() {}, async dispose() { calls.dispose += 1 },
@@ -66,4 +66,34 @@ test('resumes the exact durable native ID and never falls back to create when lo
   const third = await runtime(t, refused, root)
   await assert.rejects(third.ctx.agents.resume({ resumeSessionId: 'resume-session' }), /native load refused/)
   assert.equal(refused.calls.create, 0); assert.equal(third.ctx.agents.get('resume-session'), undefined)
+})
+
+test('creation listeners can queue work but rejection causes zero prompt before rollback', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-unpublished-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const engine = fakeEngine(); const { ctx } = await runtime(t, engine, root)
+  ctx.on('agent/created', async ({ agent }) => { agent.followup(user()); await new Promise(resolve => setImmediate(resolve)); throw new Error('creation listener refused') })
+  await assert.rejects(ctx.agents.create({ sessionId: 'listener-refused' }), /creation listener refused/)
+  assert.equal(engine.calls.prompt, 0); assert.equal(ctx.agents.get('listener-refused'), undefined)
+})
+
+test('factory close aborts and drains a pending transaction without late publication', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-pending-close-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const engine = fakeEngine(); const entered = Promise.withResolvers(); const release = Promise.withResolvers()
+  engine.create = async (_input, { handleId }) => { engine.calls.create += 1; entered.resolve(); await release.promise; return { handleId, nativeSessionId: 'native-late' } }
+  const { ctx, owner } = await runtime(t, engine, root)
+  let published = false; ctx.on('agent/created', () => { published = true })
+  const creating = ctx.agents.create({ sessionId: 'late-publication' }); await entered.promise
+  let closed = false; const closing = owner.close().then(() => { closed = true }); await new Promise(resolve => setImmediate(resolve)); assert.equal(closed, false)
+  release.resolve(); await assert.rejects(creating, /disposed/); await closing
+  assert.equal(published, false); assert.equal(ctx.agents.get('late-publication'), undefined); assert.deepEqual(owner.stats(), { accepting: false, live: 0, pending: 0 })
+})
+
+test('rejects an external-binding seed before persistence or native engine IO', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-bound-seed-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const engine = fakeEngine(); const { ctx } = await runtime(t, engine, root)
+  const parent = await ctx.agents.create({ sessionId: 'bound-parent' }); const seed = [...parent.agent.session.snapshotEvents()]
+  await parent.dispose(); const before = { ...engine.calls }
+  await assert.rejects(ctx.agents.create({ sessionId: 'bound-child', seed }), /fork from a bound session is unsupported/)
+  assert.deepEqual(engine.calls, before); assert.equal(ctx.agents.get('bound-child'), undefined)
+  await assert.rejects(ctx.sessionPersistence.open('bound-child', 'read'), /not found/i)
 })

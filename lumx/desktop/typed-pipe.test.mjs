@@ -15,9 +15,9 @@ test('correlates bounded frames with monotonic direction-local sequence', async 
   const pipes = pair(frame => seen.push(frame))
   t.after(async () => Promise.all([pipes.host.close(), pipes.supervisor.close()]))
   await pipes.supervisor.send({ channel: 'engine', type: 'response', requestId: 'r1', handleId: 'h1', payload: { ok: true } })
-  await pipes.supervisor.send({ channel: 'control', type: 'ready', payload: {} })
+  await pipes.host.send({ channel: 'control', type: 'ready', payload: {} })
   await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(seen.map(frame => [frame.seq, frame.channel, frame.type]), [[1, 'engine', 'response'], [2, 'control', 'ready']])
+  assert.deepEqual(seen.map(frame => [frame.seq, frame.channel, frame.type]), [[1, 'engine', 'response']])
 })
 
 test('fails closed on wrong generation, direction, sequence, and oversized frame', async t => {
@@ -38,7 +38,7 @@ test('fails closed on wrong generation, direction, sequence, and oversized frame
 })
 
 function inbound(seq, payload = {}) {
-  return `${JSON.stringify({ v: 1, direction: 'supervisor-to-host', channel: 'control', generation: 'generation-123456', seq, type: 'ready', payload })}\n`
+  return `${JSON.stringify({ v: 1, direction: 'supervisor-to-host', channel: 'control', generation: 'generation-123456', seq, type: 'command', requestId: `r${seq}`, payload })}\n`
 }
 
 test('rejects unterminated input and slow-handler floods within fixed bounds', async () => {

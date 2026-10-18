@@ -37,15 +37,19 @@ export function prepareQwenLaunch(input) {
   if (treeSha256(qwenRoot) !== input.qwenTreeSha256) throw new Error('Qwen tree differs from caller anchor')
   const launchId = input.launchId ?? randomUUID()
   const frozen = join(runtime, 'frozen-engine')
-  const state = join(runtime, 'engine-state')
+  const stateCandidate = input.stateRoot === undefined ? join(runtime, 'engine-state') : resolve(input.stateRoot)
+  let state = stateCandidate
   const paths = { frozen, state, home: join(state, 'home'), qwenHome: join(state, 'qwen-home'), tmp: join(state, 'tmp'), workspace }
-  let acquiredFrozen = false; let acquiredState = false
+  let acquiredFrozen = false; let acquiredState = false; let initialState = false
   try {
     mkdirSync(frozen, { mode: 0o700 }); acquiredFrozen = true
-    mkdirSync(state, { mode: 0o700 }); acquiredState = true
-    for (const path of [paths.home, paths.qwenHome, paths.tmp]) mkdirSync(path, { mode: 0o700 })
+    try { mkdirSync(state, { mode: 0o700 }); acquiredState = true; initialState = true } catch (error) { if (error?.code !== 'EEXIST') throw error }
+    state = directoryIdentity(state).path; paths.state = state; paths.home = join(state, 'home'); paths.qwenHome = join(state, 'qwen-home'); paths.tmp = join(state, 'tmp')
+    for (const path of [paths.home, paths.qwenHome, paths.tmp]) { try { mkdirSync(path, { mode: 0o700 }) } catch (error) { if (error?.code !== 'EEXIST') throw error }; directoryIdentity(path) }
     const settingsTemplate = join(frozen, 'settings.json'); const settings = join(paths.qwenHome, 'settings.json')
-    writeFileSync(settingsTemplate, QWEN_SETTINGS, { mode: 0o400 }); writeFileSync(settings, QWEN_SETTINGS, { mode: 0o600 })
+    writeFileSync(settingsTemplate, QWEN_SETTINGS, { mode: 0o400 })
+    if (initialState) writeFileSync(settings, QWEN_SETTINGS, { mode: 0o600 })
+    else if (!lstatSync(settings).isFile() || lstatSync(settings).isSymbolicLink()) throw new Error('Qwen persisted settings are not a direct file')
     const guardian = buildLumxNativeGuardian(join(frozen, 'lumx-engine-guardian'))
     const profilePath = join(frozen, 'engine.sb')
     const profile = qwenSandboxProfile({ nodePath, qwenRoot, relayPort: exactPort(input.relayPort), runtime, workspace,
@@ -54,7 +58,7 @@ export function prepareQwenLaunch(input) {
     const mutablePaths = Object.freeze(Object.fromEntries(['state', 'home', 'qwenHome', 'tmp'].map(name => [name, directoryIdentity(paths[name])])))
     const anchors = Object.freeze({ nodeSha256: input.nodeSha256, qwenCliSha256: input.qwenCliSha256, qwenTreeSha256: input.qwenTreeSha256,
       guardianSha256: sha256File(guardian), profileSha256: sha256File(profilePath), settingsSha256: sha256File(settingsTemplate), mutablePaths })
-    return Object.freeze({ anchors, launchId, nodePath, paths: Object.freeze({ ...paths, guardian, profilePath, settings, settingsTemplate }), qwenCliPath, qwenRoot,
+    return Object.freeze({ anchors, initialState, launchId, nodePath, paths: Object.freeze({ ...paths, guardian, profilePath, settings, settingsTemplate }), qwenCliPath, qwenRoot,
       relayPort: input.relayPort })
   } catch (error) {
     if (acquiredFrozen) { try { chmodSync(frozen, 0o700) } catch {}; rmSync(frozen, { recursive: true, force: true }) }

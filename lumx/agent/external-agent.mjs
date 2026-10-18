@@ -67,29 +67,42 @@ export class ExternalQwenAgent {
   #abort
   #attempt = 0
   #disposed = false
+  #active = false
   #frameRevision = 0
   #maintenance
   #running
   #toolCalls = new Map()
 
-  constructor({ ctx, engine, handleId, id, model, nativeSessionId, options, parentAgent, provider, session }) {
+  constructor({ ctx, engine, flush, handleId, id, model, nativeSessionId, options, parentAgent, provider, session }) {
     this.id = id; this.options = Object.freeze({ ...options, provider, model }); this.session = session
-    this.engine = engine; this.handleId = handleId; this.nativeSessionId = nativeSessionId; this.model = model; this.provider = provider
+    this.engine = engine; this.flush = flush; this.handleId = handleId; this.nativeSessionId = nativeSessionId; this.model = model; this.provider = provider
     this.scope = createScope(ctx, this, parentAgent === undefined ? undefined : { parent: parentAgent }); this.ctx = this.scope.ctx
     this.dispatch = agentEvents(ctx, this); this.inbox = new ExternalInbox(session, this.dispatch)
     this.lastTurn = Math.max(0, ...session.snapshotEvents().filter(event => event.type === 'turn/start').map(event => event.data.turn))
   }
   get status() { return this.#running === undefined ? 'idle' : 'running' }
   emitFrame(frame) { this.dispatch.emit('agent/assistant-stream', { frame: { ...frame, revision: ++this.#frameRevision } }) }
-  send(message, target, wakeup) { this.#assertLive(); this.inbox.append(target, message); if (wakeup) this.#wake() }
+  activate() { this.#assertLive(); if (this.#active) throw new Error('external Agent already activated'); this.#active = true; if (this.inbox.hasPending) this.#wake() }
+  send(message, target, wakeup) {
+    this.#assertLive(); textContent([message]); this.inbox.append(target, message); if (wakeup && this.#active) this.#wake()
+  }
   followup(message) { this.send(message, 'next-turn', true) }
   steer(message) { this.send(message, 'next-step', true) }
   inject(message) { this.send(message, 'next-step', false) }
   cancel(cause, options = {}) {
     if (!options.keepInbox) this.inbox.clear()
-    this.#abort?.abort(cause); if (this.#abort !== undefined) void this.engine.cancel({ handleId: this.handleId, promptId: this.#running?.promptId ?? 'none' }).catch(() => {})
+    const promptId = this.#running?.promptId; this.#abort?.abort(cause)
+    if (promptId !== undefined) void this.engine.cancel({ handleId: this.handleId, promptId }).catch(() => {})
   }
-  whenIdle() { return this.#running?.done ?? this.#maintenance ?? Promise.resolve() }
+  async whenIdle() {
+    for (;;) {
+      const work = this.#running?.done ?? this.#maintenance
+      await Promise.all([work].filter(Boolean))
+      if (this.#running !== undefined || this.#maintenance !== undefined) continue
+      await this.flush()
+      if (this.#running === undefined && this.#maintenance === undefined) return
+    }
+  }
   runMaintenance(job) {
     this.#assertLive(); if (this.#running !== undefined || this.#maintenance !== undefined) throw new Error(`agent "${this.id}" already has active work`)
     const abort = new AbortController(); this.#abort = abort
@@ -97,10 +110,12 @@ export class ExternalQwenAgent {
   }
   onUpdate(promptId, params) {
     if (this.#running?.promptId !== promptId) throw new Error('external Qwen update does not match the active prompt')
+    if (params.sessionId !== this.nativeSessionId) throw new Error('external Qwen update has the wrong native session identity')
     this.#running.attempt.update(params); this.#toolUpdate(params.update)
   }
   async requestPermission(promptId, params) {
     if (this.#running?.promptId !== promptId) return { outcome: { outcome: 'cancelled' } }
+    if (params.sessionId !== this.nativeSessionId) return { outcome: { outcome: 'cancelled' } }
     const approval = this.ctx.get('approval'); const callId = params.toolCall?.toolCallId
     if (approval === undefined || typeof callId !== 'string') return { outcome: { outcome: 'cancelled' } }
     const result = await approval.request({ agent: this, callId: ToolCallId(callId), toolName: params.toolCall.title ?? 'external-tool' })
@@ -113,11 +128,12 @@ export class ExternalQwenAgent {
 
   #assertLive() { if (this.#disposed) throw new Error(`external agent "${this.id}" is disposed`) }
   #wake() {
-    if (this.#disposed || this.#running !== undefined || this.#maintenance !== undefined) return
+    if (!this.#active || this.#disposed || this.#running !== undefined || this.#maintenance !== undefined) return
     const running = { done: undefined, promptId: undefined, attempt: undefined }; this.#running = running
-    const done = this.#drive(running); running.done = done
+    const operation = this.#drive(running)
     this.dispatch.emit('agent/status', { status: 'running' })
-    void done.finally(() => { this.#running = undefined; this.#abort = undefined; this.dispatch.emit('agent/status', { status: 'idle' }); if (this.inbox.hasPending) this.#wake() }).catch(() => {})
+    running.done = operation.finally(() => { if (this.#running === running) this.#running = undefined; this.#abort = undefined; this.dispatch.emit('agent/status', { status: 'idle' }); if (this.inbox.hasPending) this.#wake() })
+    void running.done.catch(() => {})
   }
   async #drive(running) {
     const turn = ++this.lastTurn; const step = 1; const abort = new AbortController(); this.#abort = abort
