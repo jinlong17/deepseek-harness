@@ -107,6 +107,12 @@ test('privacy qualification keeps seven protected rows while exercising same-pac
   })
   assertStrictPredicateRejects(facts, value => { value.aliasActions[0].updated.id = value.aliasActions[1].id })
   assertStrictPredicateRejects(facts, value => { value.protectedActions[0].updated.identity.url = 'file:///wrong.mjs' })
+  assertStrictPredicateRejects(facts, value => { value.protectedActions[0].updated.optionsFingerprint = '{\"id\":\"changed\"}' })
+  assertStrictPredicateRejects(facts, value => {
+    const alias = value.aliasActions[0]
+    alias.aliasEntryId = 'mutated:alias'
+    alias.enableError.message = alias.enableError.message.replace('lumx-b5-privacy-alias-group:lumx-b5-privacy-alias-session-log-deepseek', alias.aliasEntryId)
+  })
   assertStrictPredicateRejects(facts, value => { value.aliasActions[0].afterEnableSameOptions = false })
   assertStrictPredicateRejects(facts, value => { value.aliasActions[0].reinstalled.identity.url = '' })
   assertStrictPredicateRejects(facts, value => { value.aliasActions[0].updated.disabled = false })

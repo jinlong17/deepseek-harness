@@ -58,7 +58,7 @@ function matchingInactiveState(state, id, identity, packageName = PRIVACY_PACKAG
 function originalActionComplete(row, id) {
   const identity = row?.packageIdentity
   return row?.id === id && row.kind === 'protected-original' && row.executed === true && row.package === PRIVACY_PACKAGES[id]
-    && matchingInactiveState(row.before, id, identity) && matchingInactiveState(row.updated, id, identity)
+    && matchingInactiveState(row.before, id, identity) && sameOptions(row.before, row.updated) && matchingInactiveState(row.updated, id, identity)
     && row.removeRejected === true && row.removalError?.message === `LUMX governance denied include:${id}: protected row cannot be removed`
     && row.retainedSameEntry === true && row.retainedSameOptions === true && sameOptions(row.before, row.retained)
     && matchingInactiveState(row.retained, id, identity)
@@ -70,7 +70,7 @@ function aliasActionComplete(row, original) {
     && matchingInactiveState(row.created, id, identity, PRIVACY_PACKAGES[original.id])
     && row.updatedSameEntry === true && sameOptions(row.created, row.updated) && matchingInactiveState(row.updated, id, identity, PRIVACY_PACKAGES[original.id])
     && row.afterEnableSameEntry === true && row.afterEnableSameOptions === true && row.enableOutcome === 'governance-error'
-    && typeof row.aliasEntryId === 'string'
+    && row.aliasEntryId === aliasEntryId(id)
     && row.enableError?.message === `LUMX governance denied ${row.aliasEntryId}: module aliases protected identity ${identity.url}`
     && sameOptions(row.updated, row.afterEnable) && matchingInactiveState(row.afterEnable, id, identity, PRIVACY_PACKAGES[original.id])
     && row.absentInLoader === true && row.absentInGroupData === true
