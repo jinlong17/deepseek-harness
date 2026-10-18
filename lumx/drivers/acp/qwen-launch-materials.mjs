@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { chmodSync, lstatSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 
 import { sha256File, treeSha256 } from '../../build/candidate-manifest.mjs'
@@ -17,6 +17,11 @@ function exactPort(value) {
 function file(path, expected, label) {
   const actual = sha256File(path)
   if (actual !== expected) throw new Error(`${label} differs from frozen launch material`)
+}
+function directoryIdentity(path) {
+  const link = lstatSync(path); if (link.isSymbolicLink() || !link.isDirectory()) throw new Error('Qwen mutable launch path is not a direct directory')
+  const value = statSync(path)
+  return Object.freeze({ dev: value.dev, ino: value.ino, path: realpathSync(path) })
 }
 
 /** Prepare and freeze every file consumed by a later Qwen launch. */
@@ -46,8 +51,9 @@ export function prepareQwenLaunch(input) {
     const profile = qwenSandboxProfile({ nodePath, qwenRoot, relayPort: exactPort(input.relayPort), runtime, workspace,
       writable: [state, workspace], frozen: [frozen] })
     writeFileSync(profilePath, profile, { mode: 0o400 }); chmodSync(frozen, 0o500)
+    const mutablePaths = Object.freeze(Object.fromEntries(['state', 'home', 'qwenHome', 'tmp'].map(name => [name, directoryIdentity(paths[name])])))
     const anchors = Object.freeze({ nodeSha256: input.nodeSha256, qwenCliSha256: input.qwenCliSha256, qwenTreeSha256: input.qwenTreeSha256,
-      guardianSha256: sha256File(guardian), profileSha256: sha256File(profilePath), settingsSha256: sha256File(settingsTemplate) })
+      guardianSha256: sha256File(guardian), profileSha256: sha256File(profilePath), settingsSha256: sha256File(settingsTemplate), mutablePaths })
     return Object.freeze({ anchors, launchId, nodePath, paths: Object.freeze({ ...paths, guardian, profilePath, settings, settingsTemplate }), qwenCliPath, qwenRoot,
       relayPort: input.relayPort })
   } catch (error) {
@@ -64,9 +70,11 @@ export function verifyQwenLaunch(materials, { requireInitialState = false } = {}
   file(materials.paths.guardian, materials.anchors.guardianSha256, 'Qwen guardian')
   file(materials.paths.profilePath, materials.anchors.profileSha256, 'Qwen profile')
   file(materials.paths.settingsTemplate, materials.anchors.settingsSha256, 'Qwen settings template')
-  const state = realpathSync(materials.paths.state)
-  for (const name of ['home', 'qwenHome', 'tmp']) {
-    if (!inside(realpathSync(materials.paths[name]), state)) throw new Error(`Qwen ${name} escapes mutable state root`)
+  const state = materials.anchors.mutablePaths.state.path
+  for (const name of ['state', 'home', 'qwenHome', 'tmp']) {
+    const current = directoryIdentity(materials.paths[name]); const expected = materials.anchors.mutablePaths[name]
+    if (current.path !== expected.path || current.dev !== expected.dev || current.ino !== expected.ino) throw new Error(`Qwen ${name} differs from frozen mutable path identity`)
+    if (name !== 'state' && !inside(current.path, state)) throw new Error(`Qwen ${name} escapes mutable state root`)
   }
   if (lstatSync(materials.paths.settings).isSymbolicLink() || !inside(realpathSync(materials.paths.settings), realpathSync(materials.paths.qwenHome))) {
     throw new Error('Qwen settings escapes mutable state root')

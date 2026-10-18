@@ -29,7 +29,7 @@ function firstLine(readable) {
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'lumx-guardian-')); const marker = join(root, 'started')
   const program = join(root, 'program.sh'); const guardian = buildLumxNativeGuardian(join(root, 'guardian'))
-  writeFileSync(program, `#!/bin/sh\nprintf '%s' "$$" > ${JSON.stringify(marker)}\nexec /bin/sleep 30\n`); chmodSync(program, 0o700)
+  writeFileSync(program, `#!/bin/sh\n/bin/sleep 30 &\nprintf '%s %s' "$$" "$!" > ${JSON.stringify(marker)}\nwait\n`); chmodSync(program, 0o700)
   t.after(() => rmSync(root, { recursive: true, force: true }))
   return { guardian, marker, program }
 }
@@ -49,8 +49,9 @@ test('owner EOF during startup reaps the complete spawned process group', async 
   child.stdin.write('S')
   const match = /^pid:([1-9][0-9]*)$/u.exec(await firstLine(child.stdout)); assert.ok(match)
   const pid = Number(match[1]); await waitFor(() => existsSync(value.marker), 'engine startup marker')
-  assert.equal(Number(readFileSync(value.marker, 'utf8')), pid)
+  const [direct, descendant] = readFileSync(value.marker, 'utf8').split(' ').map(Number)
+  assert.equal(direct, pid); assert.equal(alive(descendant), true)
   child.stdin.end()
   assert.deepEqual(await exited, { code: 0, signal: null })
-  await waitFor(() => !alive(pid) && !alive(pid, true), 'complete engine process group reap')
+  await waitFor(() => !alive(pid) && !alive(descendant) && !alive(pid, true), 'complete engine process group reap')
 })

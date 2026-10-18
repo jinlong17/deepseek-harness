@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -42,4 +42,11 @@ test('a preparation failure removes only launch directories it acquired', t => {
   assert.throws(() => prepareQwenLaunch({ ...input, relayPort: 0 }), /relay port is invalid/)
   assert.equal(existsSync(join(input.runtime, 'frozen-engine')), false)
   assert.equal(existsSync(join(input.runtime, 'engine-state')), false)
+})
+
+test('rejects replacement of the anchored mutable state directory by an alias', t => {
+  const input = fixture(t); const materials = prepareQwenLaunch(input); const original = `${materials.paths.state}.original`
+  chmodSync(materials.paths.frozen, 0o700)
+  renameSync(materials.paths.state, original); symlinkSync(original, materials.paths.state)
+  assert.throws(() => verifyQwenLaunch(materials), /direct directory|path identity/)
 })

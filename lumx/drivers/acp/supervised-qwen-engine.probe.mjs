@@ -72,7 +72,8 @@ export async function runSupervisedQwenProbe(options) {
       lifecycle: { firstExit, secondExit }, loaded: loaded.nativeSessionId, providerRequests: requests.length,
       prompt: prompted.result, sameNativeSession: created.nativeSessionId === loaded.nativeSessionId,
       closedCreateRejected, concurrentDisposeSamePromise: true,
-      settingsPersisted: readFileSync(materials.paths.settings, 'utf8').length > 0, updates: updates.length,
+      settingsPersisted: readFileSync(materials.paths.settings, 'utf8').length > 0,
+      updateTypes: updates.map(value => value.update.sessionUpdate), updates: updates.length,
     }
   } finally {
     identity = undefined
