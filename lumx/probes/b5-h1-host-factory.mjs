@@ -27,10 +27,10 @@ export async function makeB5HostLaunchInput({ consumer, sourceAnchorSha256 }) {
 export async function runB5HostScenario({ host, runtimeAnchorSha256, qualification }) {
   return withB5FactoryCleanup(closeB5HostFactory, async () => {
     const isolation = await host.control.qualify({ operation: 'isolation-network' })
-    const privacy = await host.control.qualify({ operation: 'privacy-lifecycle' })
-    const observed = await host.control.qualify({ operation: 'h1-observe', runId: config.runId })
     const isolationFacts = qualificationFacts(isolation, 'isolation-network')
+    const privacy = await host.control.qualify({ operation: 'privacy-lifecycle' })
     const privacyFacts = qualificationFacts(privacy, 'privacy-lifecycle')
+    const observed = await host.control.qualify({ operation: 'h1-observe', runId: config.runId })
     const f = qualificationFacts(observed, 'h1-observe'); const wire = stubs.wire; const brokerCalls = calls(f.broker, 'lumx_broker'); const nativeCalls = calls(f.native, 'bash')
     const brokerResults = results(f.broker, brokerCalls.map(row => row.callId)); const nativeResults = results(f.native, nativeCalls.map(row => row.callId))
     const model = scenario => wire.model.filter(row => row.scenario === scenario); const names = value => value.map(row => row.name)

@@ -128,12 +128,15 @@ await runB5HostScenario({ host: { control: { qualify: async () => ({ type: 'qual
 process.stdout.write(readFileSync(${JSON.stringify(state.config.resultPath)}, 'utf8'));`)
   const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])
   assert.equal(result.code, 0, result.stderr)
-  assert.deepEqual(JSON.parse(result.stdout).qualification, qualification)
+  const value = JSON.parse(result.stdout)
+  assert.deepEqual(value.qualification, qualification)
+  assert.equal(value.counted_results[0].status, 'pass')
+  assert.ok(value.counted_results[0].subchecks.every(check => check.result === 'pass'))
 }
 
 test('desktop alternate results retain the received qualification for anonymous and valid fixtures', async () => {
-  await alternateQualification('desktop-alternate-anonymous', { facts: { adapterCalls: 0, failure: { code: 'identity_required' } } })
-  await alternateQualification('desktop-alternate-valid', { facts: { adapterCalls: 1, chunks: [{ type: 'finish' }] } })
+  await alternateQualification('desktop-alternate-anonymous', { adapterCalls: 0, failure: { code: 'identity_required' } })
+  await alternateQualification('desktop-alternate-valid', { adapterCalls: 1, chunks: [{ type: 'finish' }] })
 })
 
 test('Host qualification envelopes preserve failure facts and reject malformed responses before factory dereference', async () => {
@@ -158,14 +161,15 @@ test('H1 factory preserves the actual fail envelope rather than dereferencing mi
   const script = join(state.directory, 'h1-failure-child.mjs')
   await writeFile(script, `import { makeB5HostLaunchInput, runB5HostScenario } from ${JSON.stringify(pathToFileURL(modulePath('b5-h1-host-factory.mjs')).href)};
 await makeB5HostLaunchInput({ consumer: 'governed-h1', sourceAnchorSha256: 'e'.repeat(64) });
+const calls = [];
 try {
-  await runB5HostScenario({ host: { control: { qualify: async ({ operation }) => operation === 'isolation-network'
+  await runB5HostScenario({ host: { control: { qualify: async ({ operation }) => { calls.push(operation); return operation === 'isolation-network'
     ? { type: 'qualify', operation, status: 'pass', facts: { denied: true } }
-    : { type: 'qualify', status: 'fail', error: 'synthetic privacy failure' } }, consumer: 'governed-h1' }, runtimeAnchorSha256: 'f'.repeat(64), qualification: {} });
-} catch (error) { process.stdout.write(JSON.stringify({ message: error.message })); }`)
+    : { type: 'qualify', status: 'fail', error: 'synthetic privacy failure' }; } }, consumer: 'governed-h1' }, runtimeAnchorSha256: 'f'.repeat(64), qualification: {} });
+} catch (error) { process.stdout.write(JSON.stringify({ calls, message: error.message })); }`)
   const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])
   assert.equal(result.code, 0, result.stderr)
-  assert.equal(JSON.parse(result.stdout).message, 'Host qualification privacy-lifecycle response rejected: {"type":"qualify","status":"fail","error":"synthetic privacy failure"}')
+  assert.deepEqual(JSON.parse(result.stdout), { calls: ['isolation-network', 'privacy-lifecycle'], message: 'Host qualification privacy-lifecycle response rejected: {"type":"qualify","status":"fail","error":"synthetic privacy failure"}' })
 })
 
 test('desktop factory preserves a failed alternate qualification envelope', async () => {
@@ -179,6 +183,27 @@ try {
   const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])
   assert.equal(result.code, 0, result.stderr)
   assert.equal(JSON.parse(result.stdout).message, 'Host qualification byok-alternate response rejected: {"type":"qualify","status":"fail","error":"synthetic alternate failure"}')
+})
+
+test('desktop main stops qualification after an isolation failure', async () => {
+  const state = await fixture('desktop-isolation-failure', 'desktop-main')
+  const script = join(state.directory, 'desktop-isolation-failure-child.mjs')
+  await writeFile(script, `import { createServer } from 'node:http';
+import { makeB5HostLaunchInput, runB5HostScenario } from ${JSON.stringify(pathToFileURL(modulePath('b5-desktop-host-factory.mjs')).href)};
+const server = createServer((request, response) => {
+  if (request.url === '/') { response.writeHead(303, { location: '/page', 'set-cookie': 'b5=fixture' }); response.end(); return; }
+  response.writeHead(200); response.end('fixture');
+});
+await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+const port = server.address().port; const calls = [];
+await makeB5HostLaunchInput({ consumer: 'desktop-byok', sourceAnchorSha256: 'e'.repeat(64) });
+try {
+  await runB5HostScenario({ host: { consumer: 'desktop-byok', readyUrl: 'http://127.0.0.1:' + port + '/', control: { qualify: async ({ operation }) => { calls.push(operation); return { type: 'qualify', status: 'fail', error: 'synthetic isolation failure' }; } } }, runtimeAnchorSha256: 'f'.repeat(64), qualification: {} });
+} catch (error) { process.stdout.write(JSON.stringify({ calls, message: error.message })); }
+finally { await new Promise(resolve => server.close(resolve)); }`)
+  const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])
+  assert.equal(result.code, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout), { calls: ['isolation-network'], message: 'Host qualification isolation-network response rejected: {"type":"qualify","status":"fail","error":"synthetic isolation failure"}' })
 })
 
 test('an already-destroyed Qwen stream settles before provider close', async () => {

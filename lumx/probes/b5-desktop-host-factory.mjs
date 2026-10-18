@@ -47,8 +47,8 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
     const api = `${auth.origin}/api/settings/openSettingsDocument`; const authority = new URL(auth.origin).host
     const wrongOrigin = await rawRequest(api, { cookie: auth.cookie, host: authority, origin: 'http://evil.example' })
     const wrongHost = await rawRequest(api, { cookie: auth.cookie, host: 'evil.example' }); const missingOrigin = await rawRequest(api, { cookie: auth.cookie, host: authority })
-    const isolation = await host.control.qualify({ operation: 'isolation-network' }); const privacy = await host.control.qualify({ operation: 'privacy-lifecycle' })
-    const isolationFacts = qualificationFacts(isolation, 'isolation-network'); const privacyFacts = qualificationFacts(privacy, 'privacy-lifecycle')
+    const isolation = await host.control.qualify({ operation: 'isolation-network' }); const isolationFacts = qualificationFacts(isolation, 'isolation-network')
+    const privacy = await host.control.qualify({ operation: 'privacy-lifecycle' }); const privacyFacts = qualificationFacts(privacy, 'privacy-lifecycle')
     const cases = []
     cases.push(await attempt(host, 'positive'))
     cases.push(await attempt(host, 'anonymous', () => { identity = undefined }))
