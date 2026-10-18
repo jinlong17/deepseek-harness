@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { authenticate, baseLaunch, check, freePort, loadConfig, qualificationFacts, rawRequest, unit, writeResult } from './b5-hook-common.mjs'
 import { desktopStub } from './b5-fixed-stubs.mjs'
 import { withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
-import { privacyLifecycleComplete, privacyOriginalRowsInert } from './b5-host-privacy-qualification.mjs'
+import { privacyGovernanceReady, privacyLifecycleComplete, privacyOriginalRowsInert, privacyProtectedInventoryComplete, privacyShutdownComplete } from './b5-host-privacy-qualification.mjs'
 
 const config = loadConfig(); let model; let closePromise; let identity; let gatewayState = { active: true }
 const digest = value => createHash('sha256').update(value).digest('hex')
@@ -14,7 +14,11 @@ async function attempt(host, id, configure) {
   const before = model.requests.length; const response = await host.control.healthCheck()
   return fact(id, { modelRequests: model.requests.length - before, response })
 }
-function passed(response) { return response.status === 'pass' }
+function passed(response) { return response?.status === 'pass' }
+export function desktopGovernanceByokReady({ consumer, privacyFacts, positive }) {
+  return consumer === 'desktop-byok' && privacyGovernanceReady(privacyFacts)
+    && privacyProtectedInventoryComplete(privacyFacts) && positive?.modelRequests === 1 && passed(positive?.response)
+}
 export function closeB5HostFactory() {
   closePromise ??= (async () => {
     const current = model; model = undefined
@@ -69,12 +73,12 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
       ...[['anonymous','byok-anonymous-zero-model'],['wrongType','byok-wrong-type-zero-model'],['invalidExpiry','byok-invalid-expiry-zero-model'],['equalExpiry','byok-equal-expiry-zero-model'],['subjectMismatch','byok-subject-mismatch-zero-model'],['expired','byok-expired-zero-model'],['revoked','byok-revoked-zero-model']].map(([name,id]) => check(id, zero(name), byName[name]))]
     const allRows = privacyOriginalRowsInert(privacyFacts)
     const privacyLifecycle = privacyLifecycleComplete(privacyFacts)
-    const shutdown = await host.shutdown(); const closingRows = shutdown.control?.qualificationShutdown?.privacy ?? []
-    const shutdownRowsClosed = closingRows.length === 7 && closingRows.every(row => row.before.resolved && row.before.disabled === true
-      && row.sameEntryAfterShutdown && row.postInventoryPresent && row.postDisabled === true && (!row.postFiberPresent || row.postFiberState === 4))
+    const shutdown = await host.shutdown(); const privacyShutdown = shutdown.control?.qualificationShutdown?.privacy
+    const shutdownRowsClosed = privacyShutdownComplete(privacyShutdown)
+    const governanceReady = desktopGovernanceByokReady({ consumer: host.consumer, privacyFacts, positive: byName.positive })
     const cordisChecks = [check('privacy-seven-resolved-disabled-no-fiber', allRows, privacyFacts.final), check('privacy-safe-update-remove-reinstall', privacyLifecycle, { aliasActions: privacyFacts.aliasActions, aliasCleanup: privacyFacts.aliasCleanup, protectedActions: privacyFacts.protectedActions }),
-      check('privacy-late-reenable-rejected', privacyFacts.lateEnable.rejected === true, privacyFacts.lateEnable), check('privacy-renamed-absent-uncomposed-inventory', privacyFacts.candidates.every(row => privacyFacts.privacyIds.includes(row.id)), privacyFacts.candidates),
-      check('privacy-shutdown-no-fiber', shutdownRowsClosed, closingRows), check('consumer-profile-privacy-consumer', host.consumer === 'desktop-byok', { consumer: host.consumer }), check('governed-desktop-h1-adapter-capability', privacyFacts.governedCandidates.length > 0, privacyFacts.governedCandidates)]
+      check('privacy-late-reenable-rejected', privacyFacts.lateEnable.rejected === true, privacyFacts.lateEnable), check('privacy-renamed-absent-uncomposed-inventory', privacyProtectedInventoryComplete(privacyFacts), privacyFacts.candidates),
+      check('privacy-shutdown-no-fiber', shutdownRowsClosed, privacyShutdown), check('consumer-profile-privacy-consumer', host.consumer === 'desktop-byok', { consumer: host.consumer }), check('governed-desktop-h1-adapter-capability', governanceReady, { governance: privacyFacts.governance, byok: byName.positive })]
     writeResult(config, { runtimeAnchorSha256, qualification, parent_exports: { agentLoopPositive: { modelRequests: byName.positive.modelRequests,
       response: byName.positive.response, sessionId: byName.positive.response.sessionId } }, observations: { cases, http: { missingOrigin, wrongHost, wrongOrigin }, isolation, privacy, shutdown }, counted_results: [unit('real/Cordis-shutdown', cordisChecks, 'actual Host privacy lifecycle including same-ctx post-runtime shutdown facts'), unit('real/developer-Host-token-boundary', tokenChecks, 'actual Host boundary'), unit('real/developer-Host-positive', positiveChecks, 'actual main BYOK adapter; alternate controls are separate retained Hosts')] })
   })

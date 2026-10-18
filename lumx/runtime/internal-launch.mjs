@@ -111,8 +111,13 @@ export async function launchLumxRuntimeInProcess(input) {
     let stopped
     const shutdown = () => stopped ??= (async () => {
       const failures = []; let qualificationShutdown
+      let runtimeShutdownCompleted = false
       for (const [name, close] of [['qualification', () => qualification?.close()], ['external', () => external?.close()],
-        ['runtime', () => running.shutdown.shutdown(0)], ['post-runtime', () => qualification?.closeAfterRuntime()]]) {
+        ['runtime', async () => {
+          const value = await running.shutdown.shutdown(0)
+          runtimeShutdownCompleted = true
+          return value
+        }], ['post-runtime', () => qualification?.closeAfterRuntime(runtimeShutdownCompleted)]]) {
         try { const value = await close(); if (name === 'post-runtime') qualificationShutdown = value } catch (error) { failures.push(error) }
       }
       cleanup()

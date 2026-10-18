@@ -41,7 +41,11 @@ export function installGate1HostQualification(runtime, input) {
     const task = (async () => {
       if (operation === 'isolation-network') return deniedNetwork()
       if (operation === 'privacy-lifecycle') {
-        const facts = await qualifyPrivacyLifecycle(runtime.ctx)
+        if (runtime.governance?.assertReady === undefined || !Array.isArray(runtime.governance.rows)) {
+          throw new Error('Host qualification governance is unavailable')
+        }
+        runtime.governance.assertReady()
+        const facts = await qualifyPrivacyLifecycle(runtime.ctx, runtime.governance.rows)
         privacyObserved = true
         return facts
       }
@@ -54,10 +58,10 @@ export function installGate1HostQualification(runtime, input) {
     return Object.freeze({ operation, pid: process.pid, consumer: runtime.consumer, surface: runtime.surface, facts })
   }
   async function close() { closing = true; await active; if (privacyObserved) privacyShutdownRows = capturePrivacyShutdownRows(runtime.ctx) }
-  function closeAfterRuntime() {
+  function closeAfterRuntime(runtimeShutdownCompleted) {
     if (!closing) throw new Error('Host qualification closing snapshot requires a closed dispatcher')
     if (privacyShutdownRows === undefined) return undefined
-    const privacy = observePrivacyShutdownRows(privacyShutdownRows)
+    const privacy = observePrivacyShutdownRows(privacyShutdownRows, runtimeShutdownCompleted)
     const raw = JSON.stringify(privacy); if (Buffer.byteLength(raw) > 64 * 1024) throw new Error('Host closing facts exceed bound')
     return Object.freeze({ privacy })
   }

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { launchLumxRuntimeInProcess } from '../runtime/internal-launch.mjs'
-import { PRIVACY_ALIAS_GROUP_ID, privacyLifecycleComplete, privacyOriginalRowsInert, qualifyPrivacyLifecycle } from './b5-host-privacy-qualification.mjs'
+import { capturePrivacyShutdownRows, observePrivacyShutdownRows, PRIVACY_ALIAS_GROUP_ID, privacyLifecycleComplete, privacyOriginalRowsInert, privacyProtectedInventoryComplete, privacyShutdownComplete, qualifyPrivacyLifecycle } from './b5-host-privacy-qualification.mjs'
 
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
 
@@ -35,6 +35,10 @@ async function runtime(t) {
 }
 
 function copy(value) { return JSON.parse(JSON.stringify(value)) }
+function governanceRows(value) {
+  return value.governance.rows.map(row => ({ id: row.id, specifier: row.specifier,
+    identity: { format: row.format, generation: row.generation, url: row.url } }))
+}
 function protectedEntry(ctx, id) { return [...ctx.loader.entries()].find(entry => entry.options.id === id) }
 function assertOriginalRowsIntact(ctx, ids) {
   for (const id of ids) {
@@ -55,12 +59,14 @@ function assertStrictPredicateRejects(facts, mutate) {
 
 test('privacy qualification keeps seven protected rows while exercising same-package child alias lifecycle', { timeout: 30_000 }, async t => {
   const value = await runtime(t)
-  const facts = await qualifyPrivacyLifecycle(value.ctx)
+  const facts = await qualifyPrivacyLifecycle(value.ctx, governanceRows(value))
   const ids = facts.privacyIds
   assert.equal(ids.length, 7)
   assert.equal(new Set(ids).size, 7)
   assert.equal(privacyOriginalRowsInert(facts), true)
   assert.equal(privacyLifecycleComplete(facts), true)
+  assert.equal(privacyProtectedInventoryComplete(facts), true)
+  assert.deepEqual(facts.candidates.map(row => row.id).sort(), [...ids].sort())
   for (const id of ids) {
     const protectedRow = facts.protectedActions.find(row => row.id === id)
     const alias = facts.aliasActions.find(row => row.originalId === id)
@@ -119,6 +125,33 @@ test('privacy qualification keeps seven protected rows while exercising same-pac
   assertStrictPredicateRejects(facts, value => { value.aliasActions[0].absentInLoader = false })
   assertStrictPredicateRejects(facts, value => { value.aliasActions[0].reinstalled.present = false })
   assertStrictPredicateRejects(facts, value => { value.aliasCleanup.aliases[0].absent = false })
+  assertStrictPredicateRejects(facts, value => { value.candidates[0].id = 'renamed-protected-row' })
+  assertStrictPredicateRejects(facts, value => { value.candidates[0].identity.url = 'file:///wrong.mjs' })
+  assertStrictPredicateRejects(facts, value => { value.governance.rows[0].specifier = 'cordis:timer' })
+})
+
+test('privacy shutdown facts require retained inactive rows and a completed empty root inventory', { timeout: 30_000 }, async t => {
+  const value = await runtime(t)
+  const captured = capturePrivacyShutdownRows(value.ctx)
+  await value.shutdown()
+  const facts = observePrivacyShutdownRows(captured, true)
+  assert.deepEqual(facts.postInventoryIds, ['include'])
+  assert.equal(privacyShutdownComplete(facts), false)
+  const completed = copy(facts)
+  completed.postInventoryIds = []
+  assert.equal(privacyShutdownComplete(completed), true, JSON.stringify(completed))
+  assert.equal(facts.rows.length, 7)
+  assert.ok(facts.rows.every(row => row.sameEntryAfterShutdown === false && row.postInventoryPresent === false && row.postDisabled === true && row.postFiberPresent === false))
+  for (const mutate of [
+    value => { value.runtimeShutdownCompleted = false },
+    value => { value.postInventoryIds.push('unexpected') },
+    value => { value.rows.pop() },
+    value => { value.rows[0].retainedName = 'cordis:timer' },
+    value => { value.rows[0].postFiberPresent = true },
+  ]) {
+    const altered = copy(completed); mutate(altered)
+    assert.equal(privacyShutdownComplete(altered), false)
+  }
 })
 
 test('privacy qualification rejects a collision on its fixed group ID', { timeout: 30_000 }, async t => {
@@ -126,7 +159,7 @@ test('privacy qualification rejects a collision on its fixed group ID', { timeou
   const created = await value.ctx.loader.create({ id: PRIVACY_ALIAS_GROUP_ID, name: 'cordis:group', group: true, config: [] })
   await value.ctx.loader.await()
   assert.equal(created, PRIVACY_ALIAS_GROUP_ID)
-  await assert.rejects(qualifyPrivacyLifecycle(value.ctx), /privacy qualification alias collision/)
+  await assert.rejects(qualifyPrivacyLifecycle(value.ctx, governanceRows(value)), /privacy qualification alias collision/)
   assert.equal(protectedEntry(value.ctx, PRIVACY_ALIAS_GROUP_ID)?.options.id, PRIVACY_ALIAS_GROUP_ID)
 })
 
@@ -159,7 +192,7 @@ test('privacy qualification cleans owned aliases and group after a mid-alias fai
   t.after(() => {
     if (value.ctx?.loader !== undefined) value.ctx.loader.resolve = resolve
   })
-  await assert.rejects(qualifyPrivacyLifecycle(value.ctx), cause => cause === failure)
+  await assert.rejects(qualifyPrivacyLifecycle(value.ctx, governanceRows(value)), cause => cause === failure)
   assert.equal(updates, 5)
   assert.equal(protectedEntry(value.ctx, PRIVACY_ALIAS_GROUP_ID), undefined)
   assert.equal([...value.ctx.loader.entries()].some(entry => entry.options.id.startsWith('lumx-b5-privacy-alias-')), false)
@@ -180,7 +213,7 @@ test('privacy qualification removes its fixed group when create rejects after al
     return created
   }
   t.after(() => { loader.create = create })
-  await assert.rejects(qualifyPrivacyLifecycle(value.ctx), cause => cause === failure)
+  await assert.rejects(qualifyPrivacyLifecycle(value.ctx, governanceRows(value)), cause => cause === failure)
   assert.equal(protectedEntry(value.ctx, PRIVACY_ALIAS_GROUP_ID), undefined)
   assert.equal([...value.ctx.loader.entries()].some(entry => entry.options.id.startsWith('lumx-b5-privacy-alias-')), false)
   assertOriginalRowsIntact(value.ctx, [

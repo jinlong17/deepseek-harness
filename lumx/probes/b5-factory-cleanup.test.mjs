@@ -171,6 +171,45 @@ test('desktop alternate results retain the received qualification for anonymous 
   await alternateQualification('desktop-alternate-valid', { adapterCalls: 1, chunks: [{ type: 'finish' }] })
 })
 
+test('desktop governance capability requires exact policy rows, desktop consumer, and a real BYOK result', async () => {
+  const state = await fixture('desktop-governance-capability', 'desktop-main')
+  const script = join(state.directory, 'desktop-governance-capability-child.mjs')
+  const packages = {
+    'session-log-deepseek': '@deepseek-ai/dsh-session-log-deepseek',
+    'plugin-package-inventory-deepseek': '@deepseek-ai/dsh-plugin-package-inventory-deepseek',
+    'session-telemetry-otel': '@deepseek-ai/dsh-session-telemetry-otel',
+    'deepseek-account': '@deepseek-ai/dsh-deepseek-account-platform',
+    'llm-deepseek-account': '@deepseek-ai/dsh-llm-deepseek-account',
+    'desktop-product-telemetry': '@deepseek-ai/dsh-host-product-telemetry-otel',
+    'product-analytics': '@deepseek-ai/dsh-client-product-analytics',
+  }
+  await writeFile(script, `import { closeB5HostFactory, desktopGovernanceByokReady, makeB5HostLaunchInput } from ${JSON.stringify(pathToFileURL(modulePath('b5-desktop-host-factory.mjs')).href)};
+await makeB5HostLaunchInput({ consumer: 'desktop-byok', sourceAnchorSha256: 'e'.repeat(64) });
+const packages = ${JSON.stringify(packages)};
+const rows = Object.entries(packages).map(([id, specifier], index) => ({ id, specifier, identity: { format: 'module', generation: index + 1, url: 'file:///fixed/' + id + '.mjs' } }));
+const facts = () => ({ governance: { ready: true, rows: structuredClone(rows) }, protectedActions: rows.map(row => ({ id: row.id, package: row.specifier, packageIdentity: structuredClone(row.identity) })), candidates: rows.map(row => ({ id: row.id, protectedId: row.id, name: row.specifier, identity: structuredClone(row.identity), disabled: true, fiberPresent: false })) });
+const positive = { modelRequests: 1, response: { status: 'pass' } };
+const evaluate = (consumer, mutate, byok = positive) => { const privacyFacts = facts(); mutate?.(privacyFacts); return desktopGovernanceByokReady({ consumer, privacyFacts, positive: byok }); };
+const results = {
+  exact: evaluate('desktop-byok'),
+  missing: evaluate('desktop-byok', value => value.governance.rows.pop()),
+  extra: evaluate('desktop-byok', value => value.governance.rows.push(structuredClone(value.governance.rows[0]))),
+  duplicate: evaluate('desktop-byok', value => { value.governance.rows[1].id = value.governance.rows[0].id; }),
+  duplicateAction: evaluate('desktop-byok', value => { value.protectedActions[1].id = value.protectedActions[0].id; }),
+  malformed: evaluate('desktop-byok', value => { value.governance.rows[0].identity.url = ''; }),
+  failedGuard: evaluate('desktop-byok', value => { value.governance.ready = false; }),
+  wrongConsumer: evaluate('governed-h1'),
+  absentByok: evaluate('desktop-byok', undefined, { modelRequests: 0, response: { status: 'pass' } }),
+};
+await closeB5HostFactory();
+process.stdout.write(JSON.stringify(results));`)
+  const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])
+  assert.equal(result.code, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout), {
+    exact: true, missing: false, extra: false, duplicate: false, duplicateAction: false, malformed: false, failedGuard: false, wrongConsumer: false, absentByok: false,
+  })
+})
+
 test('Host qualification envelopes preserve failure facts and reject malformed responses before factory dereference', async () => {
   const facts = { denied: true }
   assert.equal(qualificationFacts({ type: 'qualify', operation: 'isolation-network', status: 'pass', facts }, 'isolation-network'), facts)

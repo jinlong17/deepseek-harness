@@ -7,7 +7,7 @@ const PRIVACY_PACKAGES = Object.freeze({
   'desktop-product-telemetry': '@deepseek-ai/dsh-host-product-telemetry-otel',
   'product-analytics': '@deepseek-ai/dsh-client-product-analytics',
 })
-const PRIVACY_IDS = Object.freeze(Object.keys(PRIVACY_PACKAGES))
+export const PRIVACY_IDS = Object.freeze(Object.keys(PRIVACY_PACKAGES))
 const LATE_ID = 'product-analytics'
 const ALIAS_PREFIX = 'lumx-b5-privacy-alias-'
 export const PRIVACY_ALIAS_GROUP_ID = `${ALIAS_PREFIX}group`
@@ -24,6 +24,14 @@ function realIdentity(value) {
 function sameIdentity(left, right) {
   return realIdentity(left) && realIdentity(right)
     && left.format === right.format && left.generation === right.generation && left.url === right.url
+}
+function normalizedGovernanceRows(rows) {
+  if (!exactCoverage(rows, PRIVACY_IDS)) return undefined
+  const values = PRIVACY_IDS.map(id => rows.find(row => row.id === id))
+  const normalized = values.map(row => row === undefined ? undefined : Object.freeze({ id: row.id, specifier: row.specifier,
+    identity: identityFromResolution(row.resolution ?? row.identity) }))
+  if (!normalized.every(row => row?.specifier === PRIVACY_PACKAGES[row.id] && realIdentity(row.identity))) return undefined
+  return Object.freeze(normalized)
 }
 function rowState(entry) {
   if (entry === undefined) return { present: false, resolved: false }
@@ -88,8 +96,22 @@ export function privacyOriginalRowsInert(facts) {
       && matchingInactiveState(facts.final.find(row => row.id === id), id, original.packageIdentity)
   })
 }
+export function privacyGovernanceReady(facts) {
+  const rows = normalizedGovernanceRows(facts?.governance?.rows)
+  if (facts?.governance?.ready !== true || rows === undefined || !exactCoverage(facts?.protectedActions, PRIVACY_IDS)) return false
+  const originals = new Map(facts.protectedActions.map(row => [row.id, row]))
+  return rows.every(row => originals.get(row.id)?.package === PRIVACY_PACKAGES[row.id]
+    && sameIdentity(row.identity, originals.get(row.id)?.packageIdentity))
+}
+export function privacyProtectedInventoryComplete(facts) {
+  const rows = normalizedGovernanceRows(facts?.governance?.rows)
+  if (rows === undefined || !exactCoverage(facts?.candidates, PRIVACY_IDS, row => row.protectedId)) return false
+  return facts.candidates.every(candidate => candidate.id === candidate.protectedId && candidate.name === PRIVACY_PACKAGES[candidate.protectedId]
+    && sameIdentity(candidate.identity, rows.find(row => row.id === candidate.protectedId)?.identity)
+    && candidate.disabled === true && candidate.fiberPresent === false)
+}
 export function privacyLifecycleComplete(facts) {
-  if (!privacyOriginalRowsInert(facts)) return false
+  if (!privacyOriginalRowsInert(facts) || !privacyGovernanceReady(facts) || !privacyProtectedInventoryComplete(facts)) return false
   const originals = new Map(facts.protectedActions.map(row => [row.id, row]))
   if (!exactCoverage(facts.aliasActions, PRIVACY_IDS, row => row.originalId)) return false
   if (!facts.aliasActions.every(row => aliasActionComplete(row, originals.get(row.originalId)))) return false
@@ -98,6 +120,14 @@ export function privacyLifecycleComplete(facts) {
     && facts.aliasCleanup.aliases.every(row => row.id === aliasId(row.originalId) && row.absent === true)
 }
 function snapshot(ctx) { return PRIVACY_IDS.map(id => rowState(entryFor(ctx, id))) }
+function protectedCandidates(ctx, governanceRows) {
+  return [...ctx.loader.entries()].flatMap(entry => {
+    const identity = identityFromResolution(entry.loader.resolveEntry(entry.options.name, entry.parent.tree.ctx.baseUrl))
+    const protectedId = governanceRows.find(row => entry.options.name === row.specifier || sameIdentity(identity, row.identity))?.id
+    return protectedId === undefined ? [] : [{ id: entry.options.id, protectedId, name: entry.options.name, identity,
+      disabled: entry.disabled, fiberPresent: entry.fiber !== undefined }]
+  })
+}
 async function protectedRowAction(ctx, id) {
   const entry = entryFor(ctx, id)
   if (entry === undefined) return { id, kind: 'protected-original', executed: false, reason: 'unresolved' }
@@ -201,25 +231,39 @@ export function capturePrivacyShutdownRows(ctx) {
     const entry = entries.find(candidate => candidate.options.id === id)
     const resolution = entry === undefined ? undefined : entry.loader.resolveEntry(entry.options.name, entry.parent.tree.ctx.baseUrl)
     return entry === undefined ? { id, entry: undefined, before: { resolved: false } } : { id, entry,
-      before: { resolved: true, disabled: entry.disabled, fiberPresent: entry.fiber !== undefined, fiberState: entry.fiber?.state ?? null,
-        name: entry.options.name, identity: resolution } }
+      before: rowState(entry), identity: identityFromResolution(resolution) }
   })
   return Object.freeze({ loader, rows: Object.freeze(rows) })
 }
-export function observePrivacyShutdownRows(captured) {
+export function observePrivacyShutdownRows(captured, runtimeShutdownCompleted) {
   if (captured?.loader === undefined || !Array.isArray(captured.rows)) throw new Error('privacy shutdown capture is invalid')
   const current = [...captured.loader.entries()]
-  return captured.rows.map(row => {
+  const rows = captured.rows.map(row => {
     const entry = current.find(candidate => candidate.options.id === row.id)
     const selected = row.entry
+    const retainedId = selected?.options?.id ?? null
+    const retainedName = selected?.options?.name ?? null
     return { id: row.id, before: row.before, sameEntryAfterShutdown: entry === selected,
       postInventoryPresent: entry !== undefined, postDisabled: selected?.disabled ?? null,
       postFiberPresent: selected?.fiber !== undefined, postFiberState: selected?.fiber?.state ?? null,
-      postName: selected?.options?.name ?? null }
+      retainedName, retainedId, retainedIdentity: row.identity,
+      retainedIdentityUnchanged: retainedId === row.id && retainedName === row.before?.package && sameIdentity(row.before?.identity, row.identity) }
   })
+  return Object.freeze({ runtimeShutdownCompleted, postInventoryIds: Object.freeze(current.map(entry => entry.options.id)), rows: Object.freeze(rows) })
+}
+export function privacyShutdownComplete(facts) {
+  if (facts?.runtimeShutdownCompleted !== true || !Array.isArray(facts.postInventoryIds) || facts.postInventoryIds.length !== 0
+    || !exactCoverage(facts.rows, PRIVACY_IDS)) return false
+  return facts.rows.every(row => row.before?.resolved === true && row.before.disabled === true && row.before.fiberPresent === false
+    && row.before.unevaluated === true && realIdentity(row.before.identity) && sameIdentity(row.before.identity, row.retainedIdentity)
+    && row.retainedId === row.id && row.retainedName === row.before.package && row.retainedIdentityUnchanged === true
+    && row.sameEntryAfterShutdown === false && row.postInventoryPresent === false
+    && row.postDisabled === true && row.postFiberPresent === false)
 }
 /** Exercise the governed loader through the actual supported Host ctx. */
-export async function qualifyPrivacyLifecycle(ctx) {
+export async function qualifyPrivacyLifecycle(ctx, governanceRows) {
+  const governance = normalizedGovernanceRows(governanceRows)
+  if (governance === undefined) throw new Error('privacy qualification governance identities are invalid')
   const initial = snapshot(ctx); const protectedActions = []
   for (const id of PRIVACY_IDS) protectedActions.push(await protectedRowAction(ctx, id))
   const aliasLifecycle = await childAliasActions(ctx, protectedActions)
@@ -250,14 +294,9 @@ export async function qualifyPrivacyLifecycle(ctx) {
     }
   }
   const final = snapshot(ctx)
-  const candidates = [...ctx.loader.entries()].flatMap(entry => {
-    const value = `${entry.options.id} ${entry.options.name}`.toLowerCase()
-    return /(deepseek|telemetry|analytics|inventory|session-log)/u.test(value)
-      ? [{ id: entry.options.id, name: entry.options.name, disabled: entry.disabled, fiberPresent: entry.fiber !== undefined }] : []
-  })
-  const governedCandidates = [...ctx.loader.entries()].flatMap(entry => /(^|[-_])h1($|[-_])|govern/iu.test(`${entry.options.id} ${entry.options.name}`)
-    ? [{ id: entry.options.id, name: entry.options.name, disabled: entry.disabled, fiberPresent: entry.fiber !== undefined }] : [])
-  const facts = Object.freeze({ aliasActions, aliasCleanup, candidates, final, governedCandidates, initial, lateEnable, privacyIds: PRIVACY_IDS, protectedActions })
+  const candidates = protectedCandidates(ctx, governance)
+  const facts = Object.freeze({ aliasActions, aliasCleanup, candidates, final, governance: Object.freeze({ ready: true, rows: governance }), initial,
+    lateEnable, privacyIds: PRIVACY_IDS, protectedActions })
   if (!privacyLifecycleComplete(facts) || lateEnable?.rejected !== true || !matchingInactiveState(lateEnable.restored, LATE_ID, facts.protectedActions.find(row => row.id === LATE_ID)?.packageIdentity)) {
     throw new Error('privacy qualification lifecycle facts rejected')
   }
