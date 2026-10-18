@@ -13,6 +13,10 @@ async function attempt(host, id, configure) {
   return fact(id, { modelRequests: model.requests.length - before, response })
 }
 function passed(response) { return response.status === 'pass' }
+export async function closeB5HostFactory() {
+  const current = model; model = undefined
+  if (current !== undefined) await current.close()
+}
 export async function makeB5HostLaunchInput({ consumer, sourceAnchorSha256 }) {
   if (consumer !== 'desktop-byok') throw new Error('desktop B5 factory consumer mismatch')
   model = await desktopStub(); identity = config.scenario === 'desktop-alternate-anonymous' ? undefined : valid()
@@ -66,5 +70,5 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
       check('privacy-shutdown-no-fiber', shutdownRowsClosed, closingRows), check('consumer-profile-privacy-consumer', host.consumer === 'desktop-byok', { consumer: host.consumer }), check('governed-desktop-h1-adapter-capability', privacyFacts.governedCandidates.length > 0, privacyFacts.governedCandidates)]
     writeResult(config, { runtimeAnchorSha256, qualification, parent_exports: { agentLoopPositive: { modelRequests: byName.positive.modelRequests,
       response: byName.positive.response, sessionId: byName.positive.response.sessionId } }, observations: { cases, http: { missingOrigin, wrongHost, wrongOrigin }, isolation, privacy, shutdown }, counted_results: [unit('real/Cordis-shutdown', cordisChecks, 'actual Host privacy lifecycle including same-ctx post-runtime shutdown facts'), unit('real/developer-Host-token-boundary', tokenChecks, 'actual Host boundary'), unit('real/developer-Host-positive', positiveChecks, 'actual main BYOK adapter; alternate controls are separate retained Hosts')] })
-  } finally { await model?.close() }
+  } finally { await closeB5HostFactory() }
 }

@@ -16,9 +16,16 @@ function continuity() {
   const bytes = readFileSync(path); if (hash(bytes) !== config.continuitySha256) throw new Error('continuity receipt differs from parent anchor')
   const value = JSON.parse(bytes); if (value.schema !== 'g9-b5-external-continuity/v1') throw new Error('continuity schema'); return value
 }
+export async function closeB5HostFactory() {
+  const currentBarriers = barriers; const current = provider
+  barriers = undefined; provider = undefined
+  currentBarriers?.streamRelease.resolve()
+  if (currentBarriers?.streamActive === true) await currentBarriers.streamFinished.promise
+  if (current !== undefined) await current.close()
+}
 export async function makeB5HostLaunchInput({ consumer, sourceAnchorSha256 }) {
   if (consumer !== 'external-qwen') throw new Error('external Qwen B5 factory consumer mismatch')
-  barriers = { streamFirst: deferred(), streamRelease: deferred(), cancelStarted: deferred(), cancelObserved: deferred() }
+  barriers = { streamActive: false, streamFirst: deferred(), streamRelease: deferred(), streamFinished: deferred(), cancelStarted: deferred(), cancelObserved: deferred() }
   provider = await qwenStub({ worldEffect: config.worldEffect, rejectEffect: config.rejectEffect, lateEffect: config.lateEffect,
     toolCommand: `/usr/bin/printf %s B5_TOOL_OK >> ${quote(config.worldEffect)}`, rejectCommand: `/usr/bin/printf REJECTED > ${quote(config.rejectEffect)}`, lateCommand: `/usr/bin/printf LATE > ${quote(config.lateEffect)}` }, barriers)
   const identity = { credential: 'synthetic-b5-external', expiresAt: '2099-01-01T00:00:00.000Z', subject: 'synthetic-b5-user', type: 'lumx.local-auth.v1' }
@@ -55,5 +62,5 @@ async function resumePhase(host, runtimeAnchorSha256, qualification) {
 }
 export async function runB5HostScenario({ host, runtimeAnchorSha256, qualification }) {
   try { return config.scenario === 'external-create' ? await createPhase(host, runtimeAnchorSha256, qualification) : await resumePhase(host, runtimeAnchorSha256, qualification) }
-  finally { barriers.streamRelease.resolve(); await provider?.close() }
+  finally { await closeB5HostFactory() }
 }

@@ -8,6 +8,10 @@ const config = loadConfig(); let stubs
 const count = (events, type) => events.filter(value => value === type).length
 function calls(summary, name) { return summary.calls.filter(value => value.name === name) }
 function results(summary, ids) { return summary.results.filter(value => ids.includes(value.callId) && value.isError) }
+export async function closeB5HostFactory() {
+  const current = stubs; stubs = undefined
+  if (current !== undefined) await current.close()
+}
 export async function makeB5HostLaunchInput({ consumer, sourceAnchorSha256 }) {
   if (consumer !== 'governed-h1') throw new Error('H1 B5 factory consumer mismatch')
   if (config.scenario === 'h1-invalid-prepare') return { sourceAnchorSha256, launchInput: { ...baseLaunch(config, consumer, await freePort()), launchId: randomUUID(),
@@ -52,5 +56,5 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
     ]
     writeResult(config, { runtimeAnchorSha256, qualification, observations: { qualification: observed, isolation, privacy, wire,
       childInventory: f.inventories.child, resumedInventory: f.inventories.resumed }, counted_results: [unit('real/H1-inventory', checks, 'actual governed H1 supported Host')] })
-  } finally { await stubs?.close() }
+  } finally { await closeB5HostFactory() }
 }

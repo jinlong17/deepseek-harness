@@ -4,6 +4,7 @@ import { createReadStream, createWriteStream, lstatSync, readFileSync, realpathS
 import { resolve } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 
+import { closeB5HostOwners, requireB5HostFactory } from './b5-factory-cleanup.mjs'
 import { verifyB5HostOwnershipAck } from './b5-owner-protocol.mjs'
 
 const MAX_FRAME = 64 * 1024
@@ -73,27 +74,18 @@ function verifyAck(ack, ready) {
   if (canonical(ack.material_sha256) !== canonical(wanted)) throw new Error('ACK material hash mismatch')
 }
 
-async function cleanup(retained, host, primary) {
-  const failures = []
-  if (host !== undefined) try { await host.shutdown() } catch (error) { failures.push(error) }
-  if (retained !== undefined) try { await retained.cleanup() } catch (error) { failures.push(error) }
-  if (primary !== undefined && failures.length) throw new AggregateError([primary, ...failures], 'controller failure plus cleanup failure')
-  if (primary !== undefined) throw primary
-  if (failures.length === 1) throw failures[0]
-  if (failures.length > 1) throw new AggregateError(failures, 'controller cleanup failed')
-}
 async function main() {
   const source = hex(arg('source-anchor-sha256'), 'source anchor'); const preparation = hex(arg('preparation-anchor-sha256'), 'preparation anchor'); const consumer = arg('consumer')
   const role = primaryRole(consumer)
   if (arg('runtime-role') !== role) throw new Error('consumer requires a different primary runtime role')
-  const ready = createWriteStream(null, { fd: fd('ready-fd'), autoClose: false })
-  const ack = createReadStream(null, { fd: fd('ack-fd'), autoClose: false })
-  let retained; let host; let primary
+  const ready = createWriteStream(null, { fd: fd('ready-fd'), autoClose: true })
+  const ack = createReadStream(null, { fd: fd('ack-fd'), autoClose: true })
+  let retained; let host; let factory; let primary
   try {
     const materials = await import(pathToFileURL(resolve(arg('materials-module'))).href)
     const supervisor = await import(pathToFileURL(resolve(arg('supervisor-module'))).href)
-    const factory = await import(pathToFileURL(resolve(arg('factory-module'))).href)
-    if (typeof materials.prepareLumxHostLaunch !== 'function' || typeof supervisor.launchLumxHost !== 'function' || typeof factory.makeB5HostLaunchInput !== 'function') throw new Error('controller module contract')
+    factory = requireB5HostFactory(await import(pathToFileURL(resolve(arg('factory-module'))).href))
+    if (typeof materials.prepareLumxHostLaunch !== 'function' || typeof supervisor.launchLumxHost !== 'function') throw new Error('controller module contract')
     const supplied = await factory.makeB5HostLaunchInput({ consumer, sourceAnchorSha256: source })
     if (!supplied?.launchInput) throw new Error('factory must supply the exact launch input')
     retained = await materials.prepareLumxHostLaunch({ ...supplied.launchInput, qualificationLedger: consumer === 'external-qwen' })
@@ -140,7 +132,7 @@ async function main() {
       materialId: value.material_id, materialType: value.material_type, role: value.role, sha256: value.sha256,
     }))), runtimeAnchorSha256: ackFrame.runtime_anchor_sha256 })
     await factory.runB5HostScenario({ host, qualification, runtimeAnchorSha256: ackFrame.runtime_anchor_sha256 })
-  } catch (error) { primary = error } finally { ready.end(); ack.destroy() }
-  await cleanup(retained, host, primary)
+  } catch (error) { primary = error } finally { ready.destroy(); ack.destroy() }
+  await closeB5HostOwners({ retained, host, factory, primary })
 }
 main().catch(error => { process.stderr.write(`B5 retained-material controller: ${error.stack ?? error.message}\n`); process.exitCode = 1 })

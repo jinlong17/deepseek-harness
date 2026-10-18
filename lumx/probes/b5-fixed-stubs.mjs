@@ -26,30 +26,37 @@ export async function desktopStub() {
   })
   return Object.freeze({ endpoint: `http://127.0.0.1:${server.port}/model`, requests, close: server.close })
 }
-export async function h1Stubs(nativeCanaryPath) {
-  const wire = { broker: [], model: [] }; let brokerOrdinal = 0; let nativeOrdinal = 0; let retryOrdinal = 0
-  const model = await listen(async (request, response) => {
-    const payload = await body(request); const messages = JSON.stringify(payload.messages)
-    const scenario = messages.includes('gateway-refusal') ? 'gateway-refusal' : messages.includes('native-tool-negative') ? 'native-tool-negative'
-      : messages.includes('retry-positive') ? 'retry-positive' : 'broker-refusal'
-    if (scenario === 'retry-positive') retryOrdinal += 1
-    const status = scenario === 'gateway-refusal' ? 403 : scenario === 'retry-positive' && retryOrdinal === 1 ? 503 : 200
-    wire.model.push({ method: request.method, path: request.url, payload, responseStatus: status, scenario })
-    response.writeHead(status, { 'content-type': 'application/json' })
-    if (status !== 200) return response.end(JSON.stringify({ error: `controlled ${scenario}` }))
-    if (scenario === 'retry-positive') return response.end(JSON.stringify({ type: 'text', text: 'Retry recovered.' }))
-    if (scenario === 'native-tool-negative') {
-      nativeOrdinal += 1; return response.end(JSON.stringify(nativeOrdinal === 1 ? { type: 'tool-call', id: 'b5-native', name: 'bash', arguments: { command: `printf changed > ${JSON.stringify(nativeCanaryPath)}`, description: 'synthetic canary' } } : { type: 'text', text: 'Native refusal observed.' }))
-    }
-    brokerOrdinal += 1; response.end(JSON.stringify(brokerOrdinal === 1 ? { type: 'tool-call', id: 'b5-broker', name: 'lumx_broker', arguments: { action: 'physical-network' } } : { type: 'text', text: 'Broker refusal observed.' }))
-  })
-  const broker = await listen(async (request, response) => {
-    const payload = await body(request); wire.broker.push({ method: request.method, path: request.url, payload, responseStatus: 403 })
-    response.writeHead(403, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: 'controlled Broker refusal' }))
-  })
-  return Object.freeze({ brokerEndpoint: `http://127.0.0.1:${broker.port}/broker`, modelEndpoint: `http://127.0.0.1:${model.port}/model`, wire,
-    close: async () => { const settled = await Promise.allSettled([model.close(), broker.close()]); const failures = settled.filter(x => x.status === 'rejected').map(x => x.reason); if (failures.length) throw new AggregateError(failures) } })
+export async function h1Stubs(nativeCanaryPath, listenFn = listen) {
+  const wire = { broker: [], model: [] }; let brokerOrdinal = 0; let nativeOrdinal = 0; let retryOrdinal = 0; let model
+  try {
+    model = await listenFn(async (request, response) => {
+      const payload = await body(request); const messages = JSON.stringify(payload.messages)
+      const scenario = messages.includes('gateway-refusal') ? 'gateway-refusal' : messages.includes('native-tool-negative') ? 'native-tool-negative'
+        : messages.includes('retry-positive') ? 'retry-positive' : 'broker-refusal'
+      if (scenario === 'retry-positive') retryOrdinal += 1
+      const status = scenario === 'gateway-refusal' ? 403 : scenario === 'retry-positive' && retryOrdinal === 1 ? 503 : 200
+      wire.model.push({ method: request.method, path: request.url, payload, responseStatus: status, scenario })
+      response.writeHead(status, { 'content-type': 'application/json' })
+      if (status !== 200) return response.end(JSON.stringify({ error: `controlled ${scenario}` }))
+      if (scenario === 'retry-positive') return response.end(JSON.stringify({ type: 'text', text: 'Retry recovered.' }))
+      if (scenario === 'native-tool-negative') {
+        nativeOrdinal += 1; return response.end(JSON.stringify(nativeOrdinal === 1 ? { type: 'tool-call', id: 'b5-native', name: 'bash', arguments: { command: `printf changed > ${JSON.stringify(nativeCanaryPath)}`, description: 'synthetic canary' } } : { type: 'text', text: 'Native refusal observed.' }))
+      }
+      brokerOrdinal += 1; response.end(JSON.stringify(brokerOrdinal === 1 ? { type: 'tool-call', id: 'b5-broker', name: 'lumx_broker', arguments: { action: 'physical-network' } } : { type: 'text', text: 'Broker refusal observed.' }))
+    })
+    const broker = await listenFn(async (request, response) => {
+      const payload = await body(request); wire.broker.push({ method: request.method, path: request.url, payload, responseStatus: 403 })
+      response.writeHead(403, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: 'controlled Broker refusal' }))
+    })
+    return Object.freeze({ brokerEndpoint: `http://127.0.0.1:${broker.port}/broker`, modelEndpoint: `http://127.0.0.1:${model.port}/model`, wire,
+      close: async () => { const settled = await Promise.allSettled([model.close(), broker.close()]); const failures = settled.filter(x => x.status === 'rejected').map(x => x.reason); if (failures.length) throw new AggregateError(failures) } })
+  } catch (primary) {
+    if (model === undefined) throw primary
+    try { await model.close() } catch (cleanup) { throw new AggregateError([primary, cleanup], 'H1 stub acquisition plus cleanup failed') }
+    throw primary
+  }
 }
+
 export async function qwenStub(config, barriers) {
   const requests = []; let ordinal = 0; let cancelCloses = 0
   const server = await listen(async (request, response) => {
@@ -57,9 +64,12 @@ export async function qwenStub(config, barriers) {
     response.writeHead(200, { 'content-type': 'text/event-stream' })
     const messages = JSON.stringify(payload.messages)
     if (messages.includes('B5 STREAM')) {
+      barriers.streamActive = true
       const base = { id: 'g9-b5-stream', object: 'chat.completion.chunk', created: 0, model: payload.model }
       response.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { role: 'assistant', content: 'FIRST' }, finish_reason: null }] })}\n\n`)
-      barriers.streamFirst.resolve(); await barriers.streamRelease.promise; return finish(response, payload, '_FINAL')
+      barriers.streamFirst.resolve(); await barriers.streamRelease.promise
+      await new Promise(resolve => { response.once('finish', resolve); finish(response, payload, '_FINAL') })
+      barriers.streamFinished?.resolve(); return
     }
     if (messages.includes('B5 CANCEL')) { barriers.cancelStarted.resolve(); response.once('close', () => { cancelCloses += 1; barriers.cancelObserved.resolve() }); return }
     const last = payload.messages?.at(-1)
