@@ -25,7 +25,7 @@ if (configPath === undefined) throw new Error('missing fixed Host configuration 
 const configBytes = readFileSync(configPath); const config = JSON.parse(configBytes)
 if (config.version !== 2 || config.configSha256 !== sha256(Buffer.from(JSON.stringify(config.payload)))) throw new Error('Host configuration digest mismatch')
 const input = config.payload
-if (!['desktop-byok', 'external-qwen', 'platform-stub'].includes(input.consumer)) throw new Error('Host configuration consumer is invalid')
+if (!['desktop-byok', 'external-qwen', 'governed-h1', 'platform-stub'].includes(input.consumer)) throw new Error('Host configuration consumer is invalid')
 // Raw stdout is the authenticated private multiplex. Product startup notices
 // are represented by the typed ready frame and must never enter that channel.
 console.log = () => {}; console.info = () => {}
@@ -69,6 +69,7 @@ try {
   const protectedPathErrors = {}; for (const path of input.protectedPaths) { try { readFileSync(path); protectedPathErrors[path] = 'READABLE' } catch (error) { protectedPathErrors[path] = error.code ?? error.name } }
   runtime = await launchLumxRuntimeInProcess({ consumer: input.consumer, mode: input.mode, osHome: input.osHome, workspaceDirectory: input.workspaceDirectory, sourceRoot: input.sourceRoot, port: input.port, environment: input.environment,
     ...input.consumer === 'desktop-byok' ? { auth: { byokKey: input.relayCapability, endpoint: input.modelEndpoint, relayOnly: true } } : {},
-    ...input.consumer === 'external-qwen' ? { external: { acp, artifactIdentity: input.external.artifactIdentity, engine: remoteEngine, engineId: input.external.engineId, model: input.external.model } } : {} })
+    ...input.consumer === 'external-qwen' ? { external: { acp, artifactIdentity: input.external.artifactIdentity, engine: remoteEngine, engineId: input.external.engineId, model: input.external.model } } : {},
+    ...input.consumer === 'governed-h1' ? { h1: input.h1 } : {} })
   await pipe.send({ channel: 'control', type: 'ready', payload: { pid: process.pid, baseUrl: runtime.baseUrl, readyUrl: runtime.readyUrl, consumer: runtime.consumer, surface: runtime.surface, governance: runtime.governance, fdObservation, childFdObservation, canaryPathError: pathError, protectedPathErrors, configSha256: sha256(configBytes) } })
 } catch (error) { process.stderr.write(`lumx-host-entry:${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); await shutdown().catch(() => {}); process.exit(1) }

@@ -32,7 +32,7 @@ function loopback(value, label) {
 }
 function hostConsumer(value) {
   const consumer = value ?? 'desktop-byok'
-  if (!['desktop-byok', 'external-qwen', 'platform-stub'].includes(consumer)) {
+  if (!['desktop-byok', 'external-qwen', 'governed-h1', 'platform-stub'].includes(consumer)) {
     throw new Error('Host product consumer is invalid')
   }
   return consumer
@@ -114,6 +114,10 @@ export async function launchLumxHost(input) {
   const consumer = hostConsumer(input.consumer)
   const model = consumer === 'desktop-byok'
     ? loopback(input.auth?.endpoint, 'model endpoint') : undefined
+  const h1 = consumer === 'governed-h1' ? {
+    broker: loopback(input.h1?.brokerEndpoint, 'H1 Broker endpoint'),
+    model: loopback(input.h1?.modelEndpoint, 'H1 model endpoint'),
+  } : undefined
   let runtime
   let relay
   let externalOwner
@@ -134,7 +138,8 @@ export async function launchLumxHost(input) {
     if (consumer === 'external-qwen') externalOwner = await prepareExternalEngineOwner({ ...input, runtime, nodePath, workspaceDirectory })
     const profile = createLumxHostSandboxProfile({
       dataHome, forkRoot, nodePath, runtime: hostRuntime, sourceRoot, workspaceDirectory,
-      ports: [port, ...relay === undefined ? [] : [Number(new URL(relay.endpoint).port)]],
+      ports: [port, ...relay === undefined ? [] : [Number(new URL(relay.endpoint).port)],
+        ...h1 === undefined ? [] : [h1.broker.port, h1.model.port]],
     })
     const profilePath = join(hostRuntime, 'lumx-host.sb')
     writeFileSync(profilePath, profile, { mode: 0o600 })
@@ -145,6 +150,7 @@ export async function launchLumxHost(input) {
         modelEndpoint: `${relay.endpoint}/chat/completions`, relayCapability: relay.capability,
       } : {},
       ...consumer === 'external-qwen' ? { external: { artifactIdentity: externalOwner.artifactIdentity, engineId: externalOwner.engineId, model: externalOwner.model } } : {},
+      ...consumer === 'governed-h1' ? { h1: { brokerEndpoint: h1.broker.url, modelEndpoint: h1.model.url } } : {},
       fdTargets: input.fdQualification?.targets ?? [0, 3, 10, 11, 512],
       canary: input.fdQualification?.canary ?? { path: join(runtime, 'absent-canary'), dev: -1, ino: -1, bytes: 0, sha256: sha256('') },
       protectedPaths: input.fdQualification?.protectedPaths ?? [],

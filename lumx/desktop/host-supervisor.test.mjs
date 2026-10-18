@@ -144,3 +144,21 @@ test('supported native Host selects the product platform-stub without opening a 
   assert.equal(value.requests(), 0)
   await host.shutdown()
 })
+
+test('supported native Host selects the isolated governed-H1 product composition', { timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'lumx-host-governed-h1-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const osHome = join(root, 'home'); const workspaceDirectory = join(root, 'workspace'); mkdirSync(osHome); mkdirSync(workspaceDirectory)
+  let modelRequests = 0; let brokerRequests = 0
+  const model = await listen(async (request, response) => { modelRequests += 1; for await (const _ of request) {};
+    response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ type: 'text', text: 'H1_HOST_OK' })) })
+  const broker = await listen(async (request, response) => { brokerRequests += 1; for await (const _ of request) {};
+    response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ ok: true })) })
+  t.after(async () => { for (const server of [model, broker]) { server.closeAllConnections?.(); await new Promise(resolve => server.close(resolve)) } })
+  const host = await launchLumxHost({ consumer: 'governed-h1', forkRoot: FORK, launchId: randomUUID(), mode: 'developer', nodePath: NODE,
+    nodeSha256: NODE_SHA256, osHome, port: await freePort(), sourceRoot: SOURCE, workspaceDirectory,
+    h1: { brokerEndpoint: `http://127.0.0.1:${broker.address().port}/broker`, modelEndpoint: `http://127.0.0.1:${model.address().port}/model` } })
+  t.after(host.shutdown)
+  assert.equal(host.consumer, 'governed-h1'); assert.equal(host.surface, 'official-dsh-web-profile-shared-host')
+  const health = await host.control.healthCheck(); assert.equal(health.status, 'pass', JSON.stringify(health)); assert.equal(modelRequests, 1); assert.equal(brokerRequests, 0)
+  await host.shutdown()
+})

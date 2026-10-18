@@ -7,6 +7,7 @@ export function installGovernedH1Composition(ctx) {
   const sessionPolicy = installGovernedH1SessionPolicy(ctx)
   return Object.freeze({
     assertAgent: sessionPolicy.assertAgent,
+    rows: governance.rows,
     assertReady() {
       governance.assertReady()
       sessionPolicy.assertReady()

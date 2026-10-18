@@ -9,8 +9,7 @@ export const GOVERNED_H1_PRIVACY_ROWS = Object.freeze([
   'deepseek-account', 'llm-deepseek-account', 'desktop-product-telemetry', 'product-analytics',
 ])
 const DISABLED_ROWS = Object.freeze([
-  'tool-bash', 'tool-pwsh', 'tool-fs', 'tool-fs-search', 'web', 'web-search-deepseek', 'web-fetch-http',
-  'tool-web', 'subagent', 'subagent-spawn-in-process', 'subagent-fork-in-process', 'tool-subagent-control',
+  'tool-bash', 'tool-pwsh', 'tool-fs', 'tool-fs-search', 'tool-web', 'tool-subagent-control',
   'tool-subagent-list-agents', 'tool-subagent', 'tool-subagent-fork', 'tool-plugin-manager', 'plugin-manager',
   ...GOVERNED_H1_PRIVACY_ROWS,
 ])
@@ -27,6 +26,7 @@ export async function createGovernedH1Profile(input) {
   await writeFile(join(profileDirectory, 'cordis.yml'), '[]\n', { mode: 0o600 })
   await writeFile(join(profileDirectory, 'cordis.patch.yml'), `${DISABLED_ROWS.map(id => `- id: ${id}\n  disabled: true`).join('\n')}\n`, { mode: 0o600 })
   await writeFile(runtimePatch, [
+    ...DISABLED_ROWS.flatMap(id => [`- id: ${id}`, '  disabled: true']),
     '- id: session-title-llm', '  disabled: true', '- id: agent-default-model', '  config:',
     '    provider: lumx-h1', '    model: h1-controlled', '- insert:', '    - id: lumx-governed-h1-adapter',
     `      name: ${yaml(pathToFileURL(H1_PLUGIN).href)}`, '      config:', `        runtimeId: ${yaml(input.runtimeId)}`,

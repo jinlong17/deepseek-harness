@@ -8,6 +8,9 @@ import { installLumxByokRuntime } from './byok-plugin.mjs'
 import { createLumxRuntimeProfile } from './profile.mjs'
 import { installLumxGovernance } from './governance.mjs'
 import { installExternalQwenComposition } from './external-qwen-composition.mjs'
+import { createGovernedH1Profile } from '../profiles/governed-h1-profile.mjs'
+import { installGovernedH1Composition } from './governed-h1-composition.mjs'
+import { installGovernedH1Runtime } from './governed-h1-adapter.mjs'
 
 let active = false
 
@@ -28,6 +31,7 @@ export async function launchLumxRuntimeInProcess(input) {
   if (!Number.isSafeInteger(input.port) || input.port < 1 || input.port > 65535) throw new Error('LUMX runtime port is invalid')
   active = true
   let releaseByok
+  let releaseH1
   let previous
   let cleaned = false
   let running
@@ -35,6 +39,7 @@ export async function launchLumxRuntimeInProcess(input) {
     if (cleaned) return
     cleaned = true
     releaseByok?.()
+    releaseH1?.()
     if (previous !== undefined) {
       process.chdir(previous.cwd)
       if (previous.dshHome === undefined) delete process.env.DSH_HOME
@@ -44,13 +49,15 @@ export async function launchLumxRuntimeInProcess(input) {
   }
   try {
     const consumer = input.consumer ?? 'desktop-byok'
-    if (!['desktop-byok', 'external-qwen', 'platform-stub'].includes(consumer)) throw new Error('LUMX product consumer is invalid')
+    if (!['desktop-byok', 'external-qwen', 'governed-h1', 'platform-stub'].includes(consumer)) throw new Error('LUMX product consumer is invalid')
     if (consumer === 'desktop-byok' && input.auth === undefined) throw new Error('desktop BYOK consumer requires launch-scoped admission')
     const launch = createLumxLaunchEnvironment(input)
     const runtimeId = randomUUID()
-    const profileName = input.mode === 'developer' ? 'lumx-developer' : 'lumx'
+    const profileName = consumer === 'governed-h1' ? 'lumx-governed-h1' : input.mode === 'developer' ? 'lumx-developer' : 'lumx'
     await mkdir(input.workspaceDirectory, { recursive: true, mode: 0o700 })
-    const profile = await createLumxRuntimeProfile({
+    const profile = consumer === 'governed-h1' ? await createGovernedH1Profile({
+      dataHomeDirectory: launch.dataHomeDirectory, runtimeId, sourceRoot: input.sourceRoot,
+    }) : await createLumxRuntimeProfile({
       consumer,
       dataHomeDirectory: launch.dataHomeDirectory,
       profileName,
@@ -58,6 +65,10 @@ export async function launchLumxRuntimeInProcess(input) {
       sourceRoot: input.sourceRoot,
     })
     if (consumer === 'desktop-byok') releaseByok = installLumxByokRuntime({ runtimeId, ...input.auth })
+    if (consumer === 'governed-h1') {
+      if (input.h1 === undefined) throw new Error('governed H1 ports are unavailable')
+      releaseH1 = installGovernedH1Runtime({ runtimeId, ...input.h1 }).release
+    }
     previous = { cwd: process.cwd(), dshHome: process.env.DSH_HOME }
     process.chdir(input.workspaceDirectory)
     process.env.DSH_HOME = launch.dataHomeDirectory
@@ -76,7 +87,7 @@ export async function launchLumxRuntimeInProcess(input) {
       resolvedProfile: { profile: resolvedProfile, installAnchor: profile.installAnchor },
       patchFiles: [profile.runtimePatch],
       async setup(hostCtx) {
-        governance = installLumxGovernance(hostCtx)
+        governance = consumer === 'governed-h1' ? installGovernedH1Composition(hostCtx) : installLumxGovernance(hostCtx)
         if (consumer === 'external-qwen') {
           if (input.external === undefined) throw new Error('external Qwen composition input is unavailable')
           hostCtx.inject(['agents', 'llm', 'sessionPersistence', 'sessions'], injected => {

@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const PRIVACY_PATCH = fileURLToPath(new URL('./privacy.patch.yml', import.meta.url))
 const BYOK_PLUGIN = fileURLToPath(new URL('./byok-plugin.mjs', import.meta.url))
 const BUNDLES = Object.freeze(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
-const DESKTOP_CONSUMERS = Object.freeze(['desktop-byok', 'external-qwen', 'platform-stub'])
+const DESKTOP_CONSUMERS = Object.freeze(['desktop-byok', 'external-qwen', 'governed-h1', 'platform-stub'])
 
 function yamlString(value) {
   return JSON.stringify(value)
