@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { PassThrough } from 'node:stream'
+import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
 import { createTypedPipe } from './typed-pipe.mjs'
 
@@ -34,5 +34,37 @@ test('fails closed on wrong generation, direction, sequence, and oversized frame
   const pipe = createTypedPipe({ readable: input, writable: output, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor', generation: 'generation-123456', onFrame() {} })
   const base64 = Buffer.alloc(800 * 1024).toString('base64')
   await assert.rejects(async () => pipe.send({ channel: 'acp', type: 'bytes', payload: { base64 } }), /byte limit/)
-  t.after(() => pipe.close())
+  t.after(() => pipe.close().catch(() => {}))
+})
+
+function inbound(seq, payload = {}) {
+  return `${JSON.stringify({ v: 1, direction: 'supervisor-to-host', channel: 'control', generation: 'generation-123456', seq, type: 'ready', payload })}\n`
+}
+
+test('rejects unterminated input and slow-handler floods within fixed bounds', async () => {
+  const unterminated = new PassThrough(); const output = new PassThrough()
+  const first = createTypedPipe({ readable: unterminated, writable: output, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor', generation: 'generation-123456', onFrame() {} })
+  unterminated.write(Buffer.alloc(1024 * 1024 + 1, 0x78))
+  await assert.rejects(first.closed, /unterminated frame exceeds byte limit/)
+
+  const flooded = new PassThrough(); const sink = new PassThrough()
+  const second = createTypedPipe({ readable: flooded, writable: sink, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor', generation: 'generation-123456', onFrame: () => new Promise(() => {}) })
+  flooded.write(Array.from({ length: 258 }, (_, index) => inbound(index + 1)).join(''))
+  await assert.rejects(second.closed, /incoming queue exceeds fixed limit/)
+})
+
+test('close aborts a blocked writer and EOF has an awaitable clean lifecycle', async () => {
+  const input = new PassThrough()
+  const blocked = new Writable({ highWaterMark: 1, write(_chunk, _encoding, _callback) {} })
+  const pipe = createTypedPipe({ readable: input, writable: blocked, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor', generation: 'generation-123456', onFrame() {} })
+  const pending = pipe.send({ channel: 'engine', type: 'request', requestId: 'r1', payload: {} }).catch(error => error)
+  await assert.rejects(pipe.close(), /aborted|typed pipe closed/i)
+  assert.match((await pending).message, /aborted|typed pipe closed/i)
+
+  const cleanInput = new PassThrough(); const cleanOutput = new PassThrough()
+  const seen = []
+  const clean = createTypedPipe({ readable: cleanInput, writable: cleanOutput, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor', generation: 'generation-123456', onFrame: frame => { seen.push(frame.seq) } })
+  cleanInput.end(inbound(1))
+  await clean.closed
+  assert.deepEqual(seen, [1])
 })
