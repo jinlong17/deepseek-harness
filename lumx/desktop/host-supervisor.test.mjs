@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -38,9 +38,9 @@ async function fixture(root, name) {
     response.end(JSON.stringify({ text: `${name}-response` }))
   })
   const identity = { credential: `${name}-identity`, expiresAt: '2099-01-01T00:00:00.000Z', subject: name, type: 'lumx.local-auth.v1' }
-  return { close: () => new Promise(resolveClose => { provider.closeAllConnections?.(); provider.close(resolveClose) }), launch: async (overrides = {}) => {
+  const prepare = async (overrides = {}) => {
     const port = await freePort()
-    return launchLumxHost(await prepareLumxHostLaunch({
+    return prepareLumxHostLaunch({
       auth: {
         byokKey: `${name}-provider-key`, endpoint: `http://127.0.0.1:${provider.address().port}/v1/chat/completions`,
         gateway: { validate: async value => ({ active: true, expiresAt: identity.expiresAt, subject: value.subject }) },
@@ -48,9 +48,15 @@ async function fixture(root, name) {
       },
       forkRoot: FORK, launchId: randomUUID(), mode: 'developer', nodePath: NODE, nodeSha256: NODE_SHA256,
       osHome, port, sourceRoot: SOURCE, workspaceDirectory, ...overrides,
-    }))
-  }, osHome, requests: () => requests, workspaceDirectory }
+    })
+  }
+  return { close: () => new Promise(resolveClose => { provider.closeAllConnections?.(); provider.close(resolveClose) }),
+    launch: async (overrides = {}) => launchLumxHost(await prepare(overrides)), osHome, prepare, requests: () => requests, workspaceDirectory }
 }
+function assertProcessGone(pid) {
+  for (const target of [pid, -pid]) assert.throws(() => process.kill(target, 0), error => error?.code === 'ESRCH')
+}
+function exactStop() { return { code: 0, signal: null, control: { stopping: true } } }
 
 test('caller anchors and pre-cancel reject before native process creation', async t => {
   const root = mkdtempSync(join(tmpdir(), 'lumx-host-preflight-'))
@@ -100,11 +106,24 @@ test('stubborn stopped Host is killed, reaped, and cleaned after bounded shutdow
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const value = await fixture(root, 'stubborn')
   t.after(value.close)
-  const host = await value.launch()
+  const runtimeParent = join(root, 'runtime'); mkdirSync(runtimeParent)
+  const host = await value.launch({ runtimeParent }); const paths = [host.bootstrap.path, host.hostProfile.path]
+  let shutdown
+  t.after(async () => {
+    if (shutdown === undefined) { try { process.kill(-host.pid, 'SIGCONT') } catch {}; shutdown = host.shutdown() }
+    await shutdown.catch(() => {})
+  })
   assert.equal(host.governance.rows.length, 7)
   assert(host.governance.rows.every(row => row.generation === 1 && row.format === 'module' && row.url.endsWith('/lib/index.js')))
   process.kill(host.pid, 'SIGSTOP')
-  assert.deepEqual(await host.shutdown(), { code: null, signal: 'SIGKILL' })
+  const started = performance.now(); shutdown = host.shutdown(); assert.strictEqual(host.shutdown(), shutdown)
+  let failure
+  try { await shutdown; assert.fail('stopped Host shutdown unexpectedly fulfilled') } catch (error) { failure = error }
+  assert(failure instanceof AggregateError); assert.match(failure.errors[0]?.message ?? '', /Host shutdown timed out/u)
+  assert.deepEqual(failure.outcome, { code: null, signal: 'SIGKILL' })
+  assert.ok(performance.now() - started < 20_000)
+  assertProcessGone(host.pid); assert.deepEqual(readdirSync(runtimeParent), [])
+  for (const path of paths) assert.equal(existsSync(path), false)
 })
 
 test('two native Hosts isolate controls and persisted sessions survive a real process restart', { timeout: 90_000 }, async t => {
@@ -112,7 +131,10 @@ test('two native Hosts isolate controls and persisted sessions survive a real pr
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const [a, b] = await Promise.all([fixture(root, 'alpha'), fixture(root, 'beta')])
   t.after(async () => { await Promise.all([a.close(), b.close()]) })
-  const [first, second] = await Promise.all([a.launch(), b.launch()])
+  const runtimeA = join(root, 'runtime-alpha'); const runtimeB = join(root, 'runtime-beta'); mkdirSync(runtimeA); mkdirSync(runtimeB)
+  const live = []
+  t.after(async () => { await Promise.all(live.map(host => host.shutdown().catch(() => {}))) })
+  const [first, second] = await Promise.all([a.launch({ runtimeParent: runtimeA }), b.launch({ runtimeParent: runtimeB })]); live.push(first, second)
   assert.equal('ctx' in first, false)
   assert.deepEqual(Object.keys(first.process), ['pid'])
   const [alpha, beta] = await Promise.all([first.control.healthCheck(), second.control.healthCheck()])
@@ -122,15 +144,39 @@ test('two native Hosts isolate controls and persisted sessions survive a real pr
   const crossed = await fetch(new URL(`${alphaUrl.pathname}${alphaUrl.search}`, second.baseUrl), { redirect: 'manual' })
   assert.notEqual(crossed.status, 303)
   const [disconnected, stopped] = await Promise.all([first.control.disconnect(), second.shutdown()])
-  assert.deepEqual(disconnected, { code: 0, signal: null }); assert.deepEqual(stopped, { code: 0, signal: null })
+  assert.deepEqual(disconnected, { code: 0, signal: null }); assert.deepEqual(stopped, exactStop())
+  assertProcessGone(first.pid); assertProcessGone(second.pid)
 
-  const restarted = await a.launch()
+  const restarted = await a.launch({ runtimeParent: runtimeA }); live.push(restarted)
   const persisted = await restarted.control.inspectSession(alpha.sessionId)
   assert.equal(persisted.status, 'pass')
   assert.equal(persisted.sessionId, alpha.sessionId)
   assert.ok(persisted.eventCount > 0)
-  assert.deepEqual(await restarted.shutdown(), { code: 0, signal: null })
+  assert.deepEqual(await restarted.shutdown(), exactStop())
+  assertProcessGone(restarted.pid); assert.deepEqual(readdirSync(runtimeA), []); assert.deepEqual(readdirSync(runtimeB), [])
   assert.equal(a.requests(), 1); assert.equal(b.requests(), 1)
+})
+
+test('control failure remains primary when material cleanup also fails', { timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'lumx-host-cleanup-failure-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const value = await fixture(root, 'cleanup-failure'); t.after(value.close)
+  const runtimeParent = join(root, 'runtime'); mkdirSync(runtimeParent)
+  const prepared = await value.prepare({ runtimeParent }); let cleanupAttempts = 0
+  const host = await launchLumxHost({ ...prepared, async cleanup() {
+    cleanupAttempts += 1; await prepared.cleanup(); throw new Error('synthetic material cleanup failure')
+  } })
+  let shutdown
+  t.after(async () => {
+    if (shutdown === undefined) { try { process.kill(-host.pid, 'SIGCONT') } catch {}; shutdown = host.shutdown() }
+    await shutdown.catch(() => {})
+  })
+  process.kill(host.pid, 'SIGSTOP'); shutdown = host.shutdown()
+  let failure
+  try { await shutdown; assert.fail('injected cleanup failure unexpectedly fulfilled') } catch (error) { failure = error }
+  assert(failure instanceof AggregateError); assert.match(failure.errors[0]?.message ?? '', /Host shutdown timed out/u)
+  assert.match(failure.errors[1]?.message ?? '', /synthetic material cleanup failure/u)
+  assert.equal(cleanupAttempts, 1); assert.deepEqual(failure.outcome, { code: null, signal: 'SIGKILL' })
+  assertProcessGone(host.pid); assert.deepEqual(readdirSync(runtimeParent), [])
 })
 
 test('supported native Host selects the product platform-stub without opening a BYOK relay', { timeout: 30_000 }, async t => {

@@ -3,6 +3,8 @@ import { createHostProcessBridge } from './host-process-bridge.mjs'
 import { verifyLumxHostLaunch } from './host-launch-materials.mjs'
 
 const BOOT_FRAME = 'LUMX_BOOTSTRAP_V1\n'
+const SHUTDOWN_GRACE_MS = 10_000
+const SIGNAL_GRACE_MS = 2_000
 function processExit(child) { return new Promise(resolveExit => child.once('close', (code, signal) => resolveExit({ code, signal }))) }
 async function withTimeout(promise, ms, label) {
   let timer
@@ -18,6 +20,15 @@ function withAbort(promise, signal) {
     promise.then(resolveValue, rejectValue).finally(() => signal.removeEventListener('abort', aborted))
   })
 }
+function remainingMs(deadline) { return Math.max(0, Math.ceil(deadline - performance.now())) }
+async function waitUntil(promise, deadline) {
+  const remaining = remainingMs(deadline)
+  if (remaining === 0) return undefined
+  let timer
+  return Promise.race([promise, new Promise(resolveWait => { timer = setTimeout(() => resolveWait(undefined), remaining) })])
+    .finally(() => clearTimeout(timer))
+}
+function appendFailure(failures, error) { if (error?.code !== 'ESRCH') failures.push(error) }
 
 /** Launch only caller-prepared and revalidated LUMX Host material. */
 export async function launchLumxHost(prepared, { beforeBootstrap } = {}) {
@@ -74,25 +85,30 @@ export async function launchLumxHost(prepared, { beforeBootstrap } = {}) {
     }
     let stopping
     const stop = command => (stopping ??= (async () => {
-      let control; let controlError; let outcome; let cleanup
-      try {
-        if (command !== undefined) try { control = await bridge.request({ command }, 'Host shutdown') } catch (error) { controlError = error }
-        else await bridge.close().catch(() => {})
-        outcome = await Promise.race([exited, new Promise(resolveWait => setTimeout(() => resolveWait(undefined), 10_000))])
-        if (outcome === undefined) {
-          try { process.kill(-child.pid, 'SIGTERM') } catch {}
-          outcome = await Promise.race([exited, new Promise(resolveWait => setTimeout(() => resolveWait(undefined), 2_000))])
-        }
-        if (outcome === undefined) {
-          try { process.kill(-child.pid, 'SIGKILL') } catch {}
-          outcome = await withTimeout(exited, 2_000, 'Host reap after SIGKILL')
-        }
-      } finally {
-        await bridge?.close().catch(() => {})
-        cleanup = await materials.cleanup()
+      const deadline = performance.now() + SHUTDOWN_GRACE_MS
+      const failures = []; let control; let outcome; let cleanup
+      if (command !== undefined) {
+        try { control = await bridge.request({ command }, 'Host shutdown', Math.max(1, remainingMs(deadline))) } catch (error) { failures.push(error) }
+      } else {
+        try { await withTimeout(bridge.close(), Math.max(1, remainingMs(deadline)), 'Host bridge close') } catch (error) { failures.push(error) }
       }
-      if (controlError !== undefined) throw new AggregateError([controlError], 'Host shutdown control failed after process cleanup')
-      return { ...outcome, control, ...(cleanup === undefined ? {} : { ownerCleanup: cleanup.externalCleanup }) }
+      outcome = await waitUntil(exited, deadline)
+      if (outcome === undefined) {
+        try { process.kill(-child.pid, 'SIGTERM') } catch (error) { appendFailure(failures, error) }
+        outcome = await waitUntil(exited, performance.now() + SIGNAL_GRACE_MS)
+      }
+      if (outcome === undefined) {
+        try { process.kill(-child.pid, 'SIGKILL') } catch (error) { appendFailure(failures, error) }
+        try { outcome = await withTimeout(exited, SIGNAL_GRACE_MS, 'Host reap after SIGKILL') } catch (error) { failures.push(error) }
+      }
+      try { await bridge?.close() } catch (error) { failures.push(error) }
+      try { cleanup = await materials.cleanup() } catch (error) { failures.push(error) }
+      if (failures.length > 0) {
+        const failure = new AggregateError(failures, 'Host shutdown failed after bounded process cleanup')
+        if (outcome !== undefined) failure.outcome = Object.freeze({ ...outcome })
+        throw failure
+      }
+      return { ...outcome, ...(command === undefined ? {} : { control }), ...(cleanup === undefined ? {} : { ownerCleanup: cleanup.externalCleanup }) }
     })())
     const shutdown = () => stop('shutdown')
     const disconnect = () => stop(undefined)
