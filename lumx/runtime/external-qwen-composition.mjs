@@ -10,8 +10,11 @@ export async function installExternalQwenComposition(ctx, input) {
   const moduleUrl = path => pathToFileURL(join(input.sourceRoot, path)).href
   const llm = await import(moduleUrl('packages/llm/llm/lib/index.js'))
   const acp = await import(moduleUrl('packages/acp/acp/lib/index.js'))
+  const agentLoop = await import(moduleUrl('packages/core/agent-loop/lib/index.js'))
   const sdk = await import(moduleUrl('apps/cli/node_modules/@agentclientprotocol/sdk/dist/acp.js'))
   const router = createExternalEngineRouter()
+  ctx.sessionProjections.register(agentLoop.turnBoundaryProjectionDefinition)
+  ctx.sessionProjections.register(agentLoop.inboxProjectionDefinition)
   class CatalogOnlyAdapter extends llm.LlmAdapter {
     providerInfo(provider) { return { id: provider, name: 'External Qwen' } }
     listModels(provider) { return Promise.resolve([{ provider, id: input.model, name: 'External Qwen', inputModalities: ['text'] }]) }
