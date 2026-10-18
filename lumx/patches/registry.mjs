@@ -125,8 +125,8 @@ export const PRODUCT_PATCHES = Object.freeze([
     removal: 'Remove the binding event, generated persistence catalog rows, AgentLoop ownership guards, and this registry entry together.',
     removalPaths: Object.freeze(['packages/core/agent/src/types.ts', 'packages/core/session/src/known-event-types.ts', 'packages/core/agent-loop/src/', 'docs/persistence-changes/2026-10-17-external-engine-binding.md', 'lumx/patches/registry.mjs']),
     tests: Object.freeze([
-      'vitest run packages/core/agent-loop/tests/external-engine-ownership.spec.ts',
-      'pnpm generate:persistence && git diff --exit-code -- docs packages/core/agent/lib',
+      'node node_modules/vitest/vitest.mjs run packages/core/agent-loop/tests/external-engine-ownership.spec.ts',
+      'pnpm run verify-persistence-catalog && pnpm run verify-persistence-changes',
     ]),
   }),
   Object.freeze({
