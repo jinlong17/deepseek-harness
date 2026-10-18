@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 
-import { baseLaunch, check, freePort, loadConfig, pending, unit, writeResult } from './b5-hook-common.mjs'
+import { baseLaunch, check, freePort, loadConfig, pending, qualificationFacts, unit, writeResult } from './b5-hook-common.mjs'
 import { h1Stubs } from './b5-fixed-stubs.mjs'
 import { withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
 
@@ -29,16 +29,17 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
     const isolation = await host.control.qualify({ operation: 'isolation-network' })
     const privacy = await host.control.qualify({ operation: 'privacy-lifecycle' })
     const observed = await host.control.qualify({ operation: 'h1-observe', runId: config.runId })
-    if (observed.status !== 'pass') throw new Error(`H1 qualification failed: ${observed.error}`)
-    const f = observed.facts; const wire = stubs.wire; const brokerCalls = calls(f.broker, 'lumx_broker'); const nativeCalls = calls(f.native, 'bash')
+    const isolationFacts = qualificationFacts(isolation, 'isolation-network')
+    const privacyFacts = qualificationFacts(privacy, 'privacy-lifecycle')
+    const f = qualificationFacts(observed, 'h1-observe'); const wire = stubs.wire; const brokerCalls = calls(f.broker, 'lumx_broker'); const nativeCalls = calls(f.native, 'bash')
     const brokerResults = results(f.broker, brokerCalls.map(row => row.callId)); const nativeResults = results(f.native, nativeCalls.map(row => row.callId))
     const model = scenario => wire.model.filter(row => row.scenario === scenario); const names = value => value.map(row => row.name)
-    const inventories = Object.values(f.inventories); const privacyInert = privacy.facts.final.every(row => row.disabled === true && !row.fiberPresent)
+    const inventories = Object.values(f.inventories); const privacyInert = Array.isArray(privacyFacts.final) && privacyFacts.final.every(row => row.disabled === true && !row.fiberPresent)
     const canary = readFileSync(config.nativeCanaryPath, 'utf8')
     const checks = [
       check('runProfile-composition', host.consumer === 'governed-h1' && JSON.stringify(f.bundles) === JSON.stringify(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']), { consumer: host.consumer, bundles: f.bundles, loaderIds: f.loaderIds }),
       pending('preparation-failure-recovery', 'Python expected-failure controller followed by this retained Host'),
-      check('privacy-rows-inert', privacyInert, privacy.facts.final), check('physical-network-denied', isolation.facts.denied === true, isolation),
+      check('privacy-rows-inert', privacyInert, privacyFacts.final), check('physical-network-denied', isolationFacts.denied === true, isolation),
       check('actual-agent-inventory', JSON.stringify(names(f.inventories.root)) === JSON.stringify(['lumx_broker']), f.inventories.root),
       check('actual-model-request-tools', wire.model.length > 0 && wire.model.every(row => JSON.stringify(row.payload.tools.map(tool => tool.name)) === JSON.stringify(['lumx_broker'])), wire.model.map(row => row.payload.tools)),
       check('actual-model-gateway-io', model('broker-refusal').length === 2, model('broker-refusal')),

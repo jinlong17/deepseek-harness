@@ -87,6 +87,17 @@ export async function follow(auth, sessionId) {
 export const check = (id, pass, evidence) => Object.freeze({ id, required: true, result: pass ? 'pass' : 'fail', evidence })
 export const pending = (id, boundary) => Object.freeze({ id, required: true, result: 'pending', evidence: { boundary } })
 export const unit = (id, checks, coverage) => Object.freeze({ id, status: checks.every(value => value.result === 'pass') ? 'pass' : 'fail', coverage, subchecks: checks })
+function describeQualificationResponse(value) {
+  try { return JSON.stringify(value) } catch { return String(value) }
+}
+export function qualificationFacts(response, operation) {
+  const object = response !== null && typeof response === 'object' && !Array.isArray(response)
+  const facts = object ? response.facts : undefined
+  if (!object || response.type !== 'qualify' || response.operation !== operation || response.status !== 'pass' || facts === null || typeof facts !== 'object' || Array.isArray(facts)) {
+    throw new Error(`Host qualification ${operation} response rejected: ${describeQualificationResponse(response)}`)
+  }
+  return facts
+}
 export function baseLaunch(config, consumer, port) {
   return { consumer, forkRoot: realpathSync(config.forkRoot), launchId: randomUUID(), mode: config.mode, nodePath: realpathSync(config.nodePath), nodeSha256: config.nodeSha256,
     osHome: realpathSync(config.osHome), port, runtimeParent: realpathSync(config.runtimeParent), sourceRoot: realpathSync(config.sourceRoot), workspaceDirectory: realpathSync(config.workspaceDirectory),

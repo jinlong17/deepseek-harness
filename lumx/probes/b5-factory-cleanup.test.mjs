@@ -11,7 +11,7 @@ import { spawn } from 'node:child_process'
 
 import { closeB5HostOwners, withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
 import { h1Stubs, qwenStub } from './b5-fixed-stubs.mjs'
-import { listen } from './b5-hook-common.mjs'
+import { listen, qualificationFacts } from './b5-hook-common.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '../..')
@@ -124,7 +124,7 @@ async function alternateQualification(scenario, facts) {
 import { makeB5HostLaunchInput, runB5HostScenario } from ${JSON.stringify(pathToFileURL(modulePath('b5-desktop-host-factory.mjs')).href)};
 const qualification = ${JSON.stringify(qualification)};
 await makeB5HostLaunchInput({ consumer: 'desktop-byok', sourceAnchorSha256: 'e'.repeat(64) });
-await runB5HostScenario({ host: { control: { qualify: async () => (${JSON.stringify(facts)}) } }, runtimeAnchorSha256: 'f'.repeat(64), qualification });
+await runB5HostScenario({ host: { control: { qualify: async () => ({ type: 'qualify', operation: 'byok-alternate', status: 'pass', facts: (${JSON.stringify(facts)}) }) } }, runtimeAnchorSha256: 'f'.repeat(64), qualification });
 process.stdout.write(readFileSync(${JSON.stringify(state.config.resultPath)}, 'utf8'));`)
   const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])
   assert.equal(result.code, 0, result.stderr)
@@ -134,6 +134,51 @@ process.stdout.write(readFileSync(${JSON.stringify(state.config.resultPath)}, 'u
 test('desktop alternate results retain the received qualification for anonymous and valid fixtures', async () => {
   await alternateQualification('desktop-alternate-anonymous', { facts: { adapterCalls: 0, failure: { code: 'identity_required' } } })
   await alternateQualification('desktop-alternate-valid', { facts: { adapterCalls: 1, chunks: [{ type: 'finish' }] } })
+})
+
+test('Host qualification envelopes preserve failure facts and reject malformed responses before factory dereference', async () => {
+  const facts = { denied: true }
+  assert.equal(qualificationFacts({ type: 'qualify', operation: 'isolation-network', status: 'pass', facts }, 'isolation-network'), facts)
+  const rejected = { type: 'qualify', status: 'fail', error: 'synthetic qualification failure' }
+  assert.throws(
+    () => qualificationFacts(rejected, 'privacy-lifecycle'),
+    error => error.message.includes(JSON.stringify(rejected)),
+  )
+  for (const value of [
+    { type: 'qualify', operation: 'privacy-lifecycle', status: 'pass' },
+    { type: 'qualify', operation: 'wrong-operation', status: 'pass', facts: {} },
+    { type: 'other', operation: 'privacy-lifecycle', status: 'pass', facts: {} },
+    { type: 'qualify', operation: 'privacy-lifecycle', status: 'fail', facts: {} },
+    null,
+  ]) assert.throws(() => qualificationFacts(value, 'privacy-lifecycle'), /Host qualification privacy-lifecycle response rejected/)
+})
+
+test('H1 factory preserves the actual fail envelope rather than dereferencing missing facts', async () => {
+  const state = await fixture('h1-qualification-failure', 'h1-valid')
+  const script = join(state.directory, 'h1-failure-child.mjs')
+  await writeFile(script, `import { makeB5HostLaunchInput, runB5HostScenario } from ${JSON.stringify(pathToFileURL(modulePath('b5-h1-host-factory.mjs')).href)};
+await makeB5HostLaunchInput({ consumer: 'governed-h1', sourceAnchorSha256: 'e'.repeat(64) });
+try {
+  await runB5HostScenario({ host: { control: { qualify: async ({ operation }) => operation === 'isolation-network'
+    ? { type: 'qualify', operation, status: 'pass', facts: { denied: true } }
+    : { type: 'qualify', status: 'fail', error: 'synthetic privacy failure' } }, consumer: 'governed-h1' }, runtimeAnchorSha256: 'f'.repeat(64), qualification: {} });
+} catch (error) { process.stdout.write(JSON.stringify({ message: error.message })); }`)
+  const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).message, 'Host qualification privacy-lifecycle response rejected: {"type":"qualify","status":"fail","error":"synthetic privacy failure"}')
+})
+
+test('desktop factory preserves a failed alternate qualification envelope', async () => {
+  const state = await fixture('desktop-qualification-failure', 'desktop-alternate-valid')
+  const script = join(state.directory, 'desktop-failure-child.mjs')
+  await writeFile(script, `import { makeB5HostLaunchInput, runB5HostScenario } from ${JSON.stringify(pathToFileURL(modulePath('b5-desktop-host-factory.mjs')).href)};
+await makeB5HostLaunchInput({ consumer: 'desktop-byok', sourceAnchorSha256: 'e'.repeat(64) });
+try {
+  await runB5HostScenario({ host: { control: { qualify: async () => ({ type: 'qualify', status: 'fail', error: 'synthetic alternate failure' }) } }, runtimeAnchorSha256: 'f'.repeat(64), qualification: {} });
+} catch (error) { process.stdout.write(JSON.stringify({ message: error.message })); }`)
+  const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).message, 'Host qualification byok-alternate response rejected: {"type":"qualify","status":"fail","error":"synthetic alternate failure"}')
 })
 
 test('an already-destroyed Qwen stream settles before provider close', async () => {

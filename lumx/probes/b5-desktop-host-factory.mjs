@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 
-import { authenticate, baseLaunch, check, freePort, loadConfig, rawRequest, unit, writeResult } from './b5-hook-common.mjs'
+import { authenticate, baseLaunch, check, freePort, loadConfig, qualificationFacts, rawRequest, unit, writeResult } from './b5-hook-common.mjs'
 import { desktopStub } from './b5-fixed-stubs.mjs'
 import { withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
 
@@ -33,7 +33,7 @@ export async function makeB5HostLaunchInput({ consumer, sourceAnchorSha256 }) {
 }
 async function alternate(host, runtimeAnchorSha256, qualification) {
   const observed = await host.control.qualify({ operation: 'byok-alternate' })
-  const facts = observed.facts; const anonymous = config.scenario.endsWith('anonymous')
+  const facts = qualificationFacts(observed, 'byok-alternate'); const anonymous = config.scenario.endsWith('anonymous')
   const id = anonymous ? 'byok-other-adapter-anonymous-blocked' : 'byok-other-adapter-positive'
   const pass = anonymous ? facts.adapterCalls === 0 && facts.failure?.code === 'identity_required'
     : facts.adapterCalls === 1 && facts.chunks.at(-1)?.type === 'finish'
@@ -48,6 +48,7 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
     const wrongOrigin = await rawRequest(api, { cookie: auth.cookie, host: authority, origin: 'http://evil.example' })
     const wrongHost = await rawRequest(api, { cookie: auth.cookie, host: 'evil.example' }); const missingOrigin = await rawRequest(api, { cookie: auth.cookie, host: authority })
     const isolation = await host.control.qualify({ operation: 'isolation-network' }); const privacy = await host.control.qualify({ operation: 'privacy-lifecycle' })
+    const isolationFacts = qualificationFacts(isolation, 'isolation-network'); const privacyFacts = qualificationFacts(privacy, 'privacy-lifecycle')
     const cases = []
     cases.push(await attempt(host, 'positive'))
     cases.push(await attempt(host, 'anonymous', () => { identity = undefined }))
@@ -58,14 +59,14 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
     cases.push(await attempt(host, 'expired', () => { identity.expiresAt = '2000-01-01T00:00:00.000Z' }))
     cases.push(await attempt(host, 'revoked', () => { gatewayState.active = false }))
     const byName = Object.fromEntries(cases.map(value => [value.name, value])); const zero = name => byName[name].modelRequests === 0 && !passed(byName[name].response)
-    const tokenChecks = [check('physical-network-denied', isolation.facts.denied === true, isolation),
+    const tokenChecks = [check('physical-network-denied', isolationFacts.denied === true, isolation),
       check('main-profile-path-denied', Object.keys(host.protectedPathErrors ?? {}).length > 0 && Object.values(host.protectedPathErrors).every(code => code !== 'READABLE'), host.protectedPathErrors),
       check('inherited-fd-read-denied', host.fdObservation?.length > 0 && host.fdObservation.every(row => !row.canaryRecovered) && host.childFdObservation?.observations?.length > 0 && host.childFdObservation.observations.every(row => !row.canaryRecovered), { host: host.fdObservation, child: host.childFdObservation }),
       check('host-token-cookie-positive', page.status === 200, { page: page.status }), check('wrong-token-rejected', wrongToken.status === 401, { status: wrongToken.status }),
       check('wrong-origin-rejected', wrongOrigin.status === 403, wrongOrigin), check('wrong-host-rejected', wrongHost.status === 403, wrongHost), check('missing-origin-observed', Number.isSafeInteger(missingOrigin.status), missingOrigin)]
     const positiveChecks = [check('byok-positive-model-response', byName.positive.modelRequests === 1 && passed(byName.positive.response), byName.positive),
       ...[['anonymous','byok-anonymous-zero-model'],['wrongType','byok-wrong-type-zero-model'],['invalidExpiry','byok-invalid-expiry-zero-model'],['equalExpiry','byok-equal-expiry-zero-model'],['subjectMismatch','byok-subject-mismatch-zero-model'],['expired','byok-expired-zero-model'],['revoked','byok-revoked-zero-model']].map(([name,id]) => check(id, zero(name), byName[name]))]
-    const privacyFacts = privacy.facts; const allRows = privacyFacts.final.every(row => row.resolved && row.disabled === true && !row.fiberPresent)
+    const allRows = Array.isArray(privacyFacts.final) && privacyFacts.final.every(row => row.resolved && row.disabled === true && !row.fiberPresent)
     const shutdown = await host.shutdown(); const closingRows = shutdown.control?.qualificationShutdown?.privacy ?? []
     const shutdownRowsClosed = closingRows.length === 7 && closingRows.every(row => row.before.resolved && row.before.disabled === true
       && row.sameEntryAfterShutdown && row.postInventoryPresent && row.postDisabled === true && (!row.postFiberPresent || row.postFiberState === 4))
