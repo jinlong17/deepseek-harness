@@ -74,3 +74,12 @@ test('an ambiguous commit whose exact receipt cannot be revoked is fatal and rem
   assert.throws(() => birth.commitSync(), error => error?.eligibilityFatal === true && /uncertain/.test(error.message)); assert.equal(birth.state(), 'uncertain')
   assert.equal(store.verifyCommitted({ ownedWriteHandle: handle, events }).prefixLength, 1)
 })
+
+test('a committed birth whose later rejection cannot be revoked becomes fatal', async t => {
+  const { eligibilityRoot, events, handle, persistenceRoot } = fixture(t); const real = createEligibilityFiles({ eligibilityRoot, persistenceRoot })
+  const faulting = { ...real, replaceOwned(...args) { if (args[2] !== undefined) throw new Error('synthetic rejection revoke failure'); return real.replaceOwned(...args) } }
+  const store = createExternalSessionEligibilityStore({ eligibilityRoot, mode: 'developer', persistenceRoot, persistenceScope: persistenceRoot }, faulting)
+  const birth = await store.prepareBirth({ ownedCreateHandle: handle, events }); birth.commitSync()
+  assert.throws(() => birth.rejectSync('notification-refused'), error => error?.eligibilityFatal === true && /uncertain/.test(error.message))
+  assert.equal(birth.state(), 'uncertain'); assert.equal(store.verifyCommitted({ ownedWriteHandle: handle, events }).prefixLength, 1)
+})

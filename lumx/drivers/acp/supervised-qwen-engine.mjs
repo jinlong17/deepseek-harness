@@ -76,7 +76,8 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
 
   function assertActive(record, signal) {
     signal?.throwIfAborted()
-    if (!accepting || (record !== undefined && handles.get(record.handleId) !== record) || record?.disposing !== undefined) throw new Error('Qwen engine lifecycle is not active')
+    if (!accepting || (record !== undefined && handles.get(record.handleId) !== record)
+      || record?.disposing !== undefined || record?.reaping !== undefined || record?.drainFailure !== undefined) throw new Error('Qwen engine lifecycle is not active')
   }
   function reserve(handleId) {
     if (!accepting) throw new Error('Qwen engine is disposed')
@@ -131,7 +132,7 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
     const qwenDiagnostic = captureBoundedTail(qwenError); const boundedOutput = createBoundedNdjsonInput(); qwenOutput.pipe(boundedOutput)
     const record = { handleId, guardian, guardianExited, guardianDiagnostic, phase: 'starting', qwenDiagnostic, qwenExit: control.exited, qwenPid: undefined,
       nativeSessionId: undefined, prompt: undefined, updates: 0, permissions: 0, disposing: undefined, reaping: undefined,
-      lifecycleAbort: new AbortController(), client: undefined }
+      lifecycleAbort: new AbortController(), drainFailure: undefined, client: undefined }
     handles.set(handleId, record)
     try {
       record.client = new ClientSideConnection(() => ({
@@ -234,9 +235,12 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
           if (handles.get(record.handleId) === record && record.disposing === undefined) handles.delete(record.handleId)
         }
         try { await drainCallbacks(prompt) } catch (callbackError) { failures.push(callbackError); void reap(record).catch(() => {}) }
-        throw combined(failures, 'Qwen prompt failed to settle cleanly')
+        const failure = combined(failures, 'Qwen prompt failed to settle cleanly')
+        if (failures.length > 1) record.drainFailure ??= failure
+        throw failure
       }
-    } finally { context.signal.removeEventListener('abort', abort); if (record.prompt === prompt) record.prompt = undefined; done.resolve(); if (handles.get(record.handleId) === record && record.disposing === undefined) record.phase = 'ready' }
+    } finally { context.signal.removeEventListener('abort', abort); if (record.prompt === prompt) record.prompt = undefined; done.resolve();
+      if (handles.get(record.handleId) === record && record.disposing === undefined && record.reaping === undefined && record.drainFailure === undefined) record.phase = 'ready' }
   }
 
   async function cancel({ handleId, promptId }) {
@@ -266,6 +270,7 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
           try { await timeout(record.prompt.done.promise, 'Qwen active prompt disposal drain', 5_000) }
           catch (error) { failures.push(error) }
         }
+        if (record.drainFailure !== undefined) failures.push(record.drainFailure)
         let result
         try { result = await reap(record) } catch (error) { failures.push(error) }
         const error = combined(failures, 'Qwen handle disposal failed')

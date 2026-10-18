@@ -10,6 +10,7 @@ import SessionStore from '../../packages/core/session/lib/index.js'
 import { createUserMessage } from '../../packages/llm/llm/lib/index.js'
 import JsonlSessionPersistence from '../../packages/session/session-persistence-jsonl/lib/index.js'
 import { createExternalEngineRouter, createExternalQwenFactory } from './external-agent-factory.mjs'
+import { createEligibilityFiles } from './external-session-eligibility-files.mjs'
 import { createExternalSessionEligibilityStore } from './external-session-eligibility.mjs'
 
 function engine() {
@@ -21,10 +22,10 @@ function engine() {
     async cancel() {}, async dispose() { calls.dispose += 1 },
   }
 }
-async function runtime(t, native, root) {
+async function runtime(t, native, root, eligibilityOverride) {
   const ctx = new Context(); await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry); await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
   const router = createExternalEngineRouter(); native.router = router
-  const eligibility = createExternalSessionEligibilityStore({ eligibilityRoot: `${root}-eligibility`, mode: 'developer', persistenceRoot: root, persistenceScope: root })
+  const eligibility = eligibilityOverride ?? createExternalSessionEligibilityStore({ eligibilityRoot: `${root}-eligibility`, mode: 'developer', persistenceRoot: root, persistenceScope: root })
   const owner = createExternalQwenFactory(ctx, { artifactIdentity: 'artifact-sha256', eligibility, engine: native,
     engineId: 'qwen-code-0.24.0', model: 'qwen3.7-max', provider: 'external-qwen', router })
   t.after(async () => { await owner.close().catch(() => {}); await ctx.fiber.dispose().catch(() => {}) })
@@ -56,4 +57,16 @@ test('direct disposed cancellation parks queued work without disposing the publi
   handle.agent.cancel({ kind: 'disposed' }, { keepInbox: true }); await handle.agent.whenIdle()
   assert.equal(native.calls.prompt, 1); assert.equal(handle.agent.status, 'idle'); assert.equal(handle.agent.inbox.hasPending, true)
   await handle.dispose(); assert.equal(native.calls.dispose, 1)
+})
+
+test('failed revocation after listener rejection latches the factory before recovery IO', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'external-listener-revoke-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const eligibilityRoot = `${root}-eligibility`; const real = createEligibilityFiles({ eligibilityRoot, persistenceRoot: root })
+  const files = { ...real, replaceOwned(...args) { if (args[2] !== undefined) throw new Error('synthetic listener revoke failure'); return real.replaceOwned(...args) } }
+  const eligibility = createExternalSessionEligibilityStore({ eligibilityRoot, mode: 'developer', persistenceRoot: root, persistenceScope: root }, files)
+  const native = engine(); const active = await runtime(t, native, root, eligibility)
+  active.ctx.on('agent/created', () => { throw new Error('synthetic listener refusal') })
+  await assert.rejects(active.ctx.agents.create({ sessionId: 'listener-revoke' }), error => error instanceof AggregateError && /cleanup was incomplete/.test(error.message))
+  assert.equal(active.owner.stats().accepting, false); assert.equal(native.calls.load, 0)
+  await assert.rejects(active.ctx.agents.resume({ resumeSessionId: 'listener-revoke' }), /factory|available|disposed/i); assert.equal(native.calls.load, 0)
 })

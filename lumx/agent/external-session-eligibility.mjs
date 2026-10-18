@@ -93,7 +93,7 @@ export function createExternalSessionEligibilityStore(input, filesOverride) {
         rejectSync() {
           if (state === 'accepted') throw new Error('accepted eligibility birth cannot be revoked')
           if (state === 'revoked') return
-          revoke()
+          try { revoke() } catch (error) { state = 'uncertain'; throw fatal(error) }
         },
         accept() { if (state !== 'committed') throw new Error('eligibility birth is not committed'); files.discardTemporary(reservation.temporary); state = 'accepted' },
         state() { return state },
