@@ -15,6 +15,7 @@ const args = Object.fromEntries(process.argv.slice(2).flatMap((value, index, all
 
 function arg(name) { if (typeof args[name] !== 'string') throw new Error(`missing --${name}`); return args[name] }
 function hex(value, label) { if (!/^[a-f0-9]{64}$/u.test(value)) throw new Error(`${label} must be SHA-256`); return value }
+function ackTimeout(value) { const parsed = Number(value ?? 120_000); if (!Number.isSafeInteger(parsed) || parsed < 1_000 || parsed > 300_000) throw new Error('ACK timeout is invalid'); return parsed }
 function fd(name) { const value = Number(arg(name)); if (!Number.isInteger(value) || value < 3) throw new Error(`invalid --${name}`); return value }
 function same(left, right) { const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b) }
 function canonical(value) { return JSON.stringify(value, Object.keys(value).sort()) }
@@ -116,11 +117,15 @@ async function main() {
       launch_argv: [retained.paths.bootstrap, '/usr/bin/sandbox-exec', retained.paths.profilePath, retained.nodePath, retained.paths.hostEntry, retained.paths.configPath],
     })
     await write(ready, readyFrame)
-    const ackFrame = await read(ack, Number(args['ack-timeout-ms'] ?? 15_000))
+    const ackFrame = await read(ack, ackTimeout(args['ack-timeout-ms']))
     verifyAck(ackFrame, readyFrame)
     host = await supervisor.launchLumxHost(retained)
     if (typeof factory.runB5HostScenario !== 'function') throw new Error('scenario runner required')
-    await factory.runB5HostScenario({ host, runtimeAnchorSha256: ackFrame.runtime_anchor_sha256 })
+    const qualification = Object.freeze({ consumer, host: Object.freeze({ configSha256: host.configSha256, generation: host.generation, pid: host.pid,
+      profileSha256: host.hostProfile.sha256, role }), materials: Object.freeze(rows.map(value => Object.freeze({
+      materialId: value.material_id, materialType: value.material_type, role: value.role, sha256: value.sha256,
+    }))), runtimeAnchorSha256: ackFrame.runtime_anchor_sha256 })
+    await factory.runB5HostScenario({ host, qualification, runtimeAnchorSha256: ackFrame.runtime_anchor_sha256 })
   } catch (error) { primary = error } finally { ready.end(); ack.destroy() }
   await cleanup(retained, host, primary)
 }

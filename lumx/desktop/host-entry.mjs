@@ -52,6 +52,7 @@ async function command(frame) {
   const value = frame.payload
   if (value?.command === 'health') return healthCheck()
   if (value?.command === 'inspect-session' && typeof value.sessionId === 'string' && /^[0-9a-f-]{36}$/u.test(value.sessionId)) { const result = await runtime.ctx.sessionController.inspect(value.sessionId, new AbortController().signal); return { eventCount: result.events.length, sessionId: value.sessionId } }
+  if (value?.command === 'qualify' && runtime.qualification !== undefined) return runtime.qualification.execute(value.request)
   if (value?.command === 'shutdown') { setImmediate(() => void shutdown().then(() => process.exit(0), () => process.exit(1))); return { stopping: true } }
   throw new Error('Host control command is invalid')
 }
@@ -68,7 +69,7 @@ try {
   const fdObservation = observeFileDescriptors(input.fdTargets, input.canary); const childFdObservation = await childObservation(input.nodePath, { targets: input.fdTargets, canary: input.canary })
   let pathError; try { readFileSync(input.canary.path) } catch (error) { pathError = error.code ?? error.name }
   const protectedPathErrors = {}; for (const path of input.protectedPaths) { try { readFileSync(path); protectedPathErrors[path] = 'READABLE' } catch (error) { protectedPathErrors[path] = error.code ?? error.name } }
-  runtime = await launchLumxRuntimeInProcess({ consumer: input.consumer, mode: input.mode, osHome: input.osHome, workspaceDirectory: input.workspaceDirectory, sourceRoot: input.sourceRoot, port: input.port, environment: input.environment,
+  runtime = await launchLumxRuntimeInProcess({ consumer: input.consumer, qualification: input.qualification, mode: input.mode, osHome: input.osHome, workspaceDirectory: input.workspaceDirectory, sourceRoot: input.sourceRoot, port: input.port, environment: input.environment,
     ...input.consumer === 'desktop-byok' ? { auth: { byokKey: input.relayCapability, endpoint: input.modelEndpoint, relayOnly: true } } : {},
     ...input.consumer === 'external-qwen' ? { external: { acp, ...input.external, engine: remoteEngine } } : {},
     ...input.consumer === 'governed-h1' ? { h1: input.h1 } : {} })

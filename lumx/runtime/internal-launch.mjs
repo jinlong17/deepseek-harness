@@ -11,6 +11,7 @@ import { installExternalQwenComposition } from './external-qwen-composition.mjs'
 import { createGovernedH1Profile } from '../profiles/governed-h1-profile.mjs'
 import { installGovernedH1Composition } from './governed-h1-composition.mjs'
 import { installGovernedH1Runtime } from './governed-h1-adapter.mjs'
+import { installGate1HostQualification } from '../probes/b5-host-qualification.mjs'
 
 let active = false
 
@@ -104,11 +105,17 @@ export async function launchLumxRuntimeInProcess(input) {
     const port = running.ctx.webServer.port
     const baseUrl = `http://127.0.0.1:${String(port)}`
     const readyUrl = running.ctx.connection.authenticatedUrl(baseUrl)
+    const surface = consumer === 'platform-stub' ? 'local-platform-stub' : consumer === 'external-qwen'
+      ? 'official-dsh-web-acp-shared-host' : 'official-dsh-web-profile-shared-host'
+    const qualification = installGate1HostQualification({ consumer, ctx: running.ctx, governance, surface }, input)
     let stopped
     const shutdown = () => stopped ??= (async () => {
-      try { await external?.close(); await running.shutdown.shutdown(0) } finally {
-        cleanup()
+      const failures = []
+      for (const close of [() => qualification?.close(), () => external?.close(), () => running.shutdown.shutdown(0)]) {
+        try { await close() } catch (error) { failures.push(error) }
       }
+      cleanup()
+      if (failures.length) throw new AggregateError(failures, 'LUMX runtime shutdown failed')
     })()
     return Object.freeze({
       baseUrl,
@@ -122,9 +129,8 @@ export async function launchLumxRuntimeInProcess(input) {
         format: row.resolution.format, generation: row.resolution.generation,
       })) }),
       ...external === undefined ? {} : { external },
-      readyUrl,
-      surface: consumer === 'platform-stub' ? 'local-platform-stub' : consumer === 'external-qwen'
-        ? 'official-dsh-web-acp-shared-host' : 'official-dsh-web-profile-shared-host',
+      ...qualification === undefined ? {} : { qualification },
+      readyUrl, surface,
       shutdown,
     })
   } catch (error) {

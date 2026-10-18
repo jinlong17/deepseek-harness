@@ -36,11 +36,11 @@ export function createHostProcessBridge({ child, engine, generation }) {
     onPermission: ({ handleId, promptId, params, signal }) => rpc.request('permission', params, { handleId, promptId, signal }),
     onUpdate: ({ handleId, promptId, params }) => rpc.event('update', params, { handleId, promptId }),
   })
-  function request(command, label) {
+  function request(command, label, timeoutMs = CONTROL_TIMEOUT_MS) {
     if (!accepting) return Promise.reject(new Error('Host bridge is closed'))
     const requestId = randomUUID(); const result = Promise.withResolvers(); controls.set(requestId, result)
     void pipe.send({ channel: 'control', type: 'command', requestId, payload: command }, { priority: command.command === 'shutdown' }).catch(error => { controls.delete(requestId); result.reject(error) })
-    return timeout(result.promise, CONTROL_TIMEOUT_MS, label).finally(() => controls.delete(requestId))
+    return timeout(result.promise, timeoutMs, label).finally(() => controls.delete(requestId))
   }
   async function close(reason = new Error('Host bridge closed')) {
     if (!accepting) return; accepting = false

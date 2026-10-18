@@ -87,20 +87,21 @@ export async function launchLumxHost(prepared) {
     })())
     const shutdown = () => stop('shutdown')
     const disconnect = () => stop(undefined)
-    const requestControl = (command, timeoutLabel) => {
+    const requestControl = (command, timeoutLabel, timeoutMs) => {
       if (stopping !== undefined) return Promise.reject(new Error('Host is shutting down'))
       if (!alive) return Promise.reject(new Error('Host process is not running'))
-      return bridge.request(command, timeoutLabel).then(value => ({ type: command.command, status: 'pass', ...value }), error => ({ type: command.command, status: 'fail', error: error.message }))
+      return bridge.request(command, timeoutLabel, timeoutMs).then(value => ({ type: command.command, status: 'pass', ...value }), error => ({ type: command.command, status: 'fail', error: error.message }))
     }
     const healthCheck = () => requestControl({ command: 'health' }, 'Host health check')
+    const qualify = request => requestControl({ command: 'qualify', request }, 'Host qualification', 180_000)
     const inspectSession = sessionId => /^[0-9a-f-]{36}$/u.test(sessionId)
       ? requestControl({ command: 'inspect-session', sessionId }, 'Host session inspection')
       : Promise.reject(new Error('Host session identity is invalid'))
     return Object.freeze({
       baseUrl: readyValue.baseUrl, bootstrap: { path: bootstrap, sha256: materials.anchors.bootstrapSha256 },
-      consumer: readyValue.consumer, surface: readyValue.surface,
+      consumer: readyValue.consumer, generation: payload.generation, surface: readyValue.surface,
       canaryPathError: readyValue.canaryPathError, configSha256: readyValue.configSha256,
-      control: Object.freeze({ disconnect, healthCheck, inspectSession, shutdown }), fdObservation: readyValue.fdObservation,
+      control: Object.freeze({ disconnect, healthCheck, inspectSession, ...payload.qualification === undefined ? {} : { qualify }, shutdown }), fdObservation: readyValue.fdObservation,
       childFdObservation: readyValue.childFdObservation, hostProfile: { bytes: profile, path: profilePath, sha256: materials.anchors.profileSha256 },
       governance: readyValue.governance,
       execution: Object.freeze({ argv: Object.freeze([bootstrap, '/usr/bin/sandbox-exec', ...argv]), envKeys: Object.freeze(['HOME', 'LANG', 'LC_ALL', 'NO_COLOR', 'PATH', 'TMPDIR']) }),

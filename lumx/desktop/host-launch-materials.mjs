@@ -39,6 +39,15 @@ function tcpPort(value) {
   if (!Number.isSafeInteger(value) || value < 1 || value > 65535) throw new Error('Host port is invalid')
   return value
 }
+const QUALIFICATION_OPERATIONS = new Set(['isolation-network', 'privacy-lifecycle', 'h1-observe', 'byok-alternate'])
+function qualification(value, selectedConsumer) {
+  if (value === undefined) return undefined
+  if (value?.version !== 1 || !Array.isArray(value.operations) || value.operations.length === 0 || Object.keys(value).sort().join(',') !== 'operations,version') throw new Error('Host qualification declaration is invalid')
+  if (new Set(value.operations).size !== value.operations.length || value.operations.some(name => !QUALIFICATION_OPERATIONS.has(name))) throw new Error('Host qualification operation is invalid')
+  const allowed = selectedConsumer === 'desktop-byok' ? new Set(['isolation-network', 'privacy-lifecycle', 'byok-alternate']) : selectedConsumer === 'governed-h1' ? new Set(['isolation-network', 'privacy-lifecycle', 'h1-observe']) : new Set()
+  if (value.operations.some(name => !allowed.has(name))) throw new Error('Host qualification operation does not match consumer')
+  return Object.freeze({ version: 1, operations: Object.freeze([...value.operations]) })
+}
 function consumer(value) {
   const selected = value ?? 'desktop-byok'
   if (!['desktop-byok', 'external-qwen', 'governed-h1', 'platform-stub'].includes(selected)) throw new Error('Host product consumer is invalid')
@@ -86,6 +95,7 @@ export async function prepareLumxHostLaunch(input) {
   const workspaceDirectory = directory(realpathSync(input.workspaceDirectory), 'Host workspace').path
   const dataHome = dataHomeFor(input.mode, osHome, workspaceDirectory); const port = tcpPort(input.port)
   const selectedConsumer = consumer(input.consumer); const environment = launchEnvironment(input.environment)
+  const qualificationDeclaration = qualification(input.qualification, selectedConsumer)
   const model = selectedConsumer === 'desktop-byok' ? loopback(input.auth?.endpoint, 'model endpoint') : undefined
   const h1 = selectedConsumer === 'governed-h1' ? { broker: loopback(input.h1?.brokerEndpoint, 'H1 Broker endpoint'), model: loopback(input.h1?.modelEndpoint, 'H1 model endpoint') } : undefined
   const releasePort = await reservePort(port)
@@ -104,6 +114,7 @@ export async function prepareLumxHostLaunch(input) {
       ports: [port, ...relay === undefined ? [] : [Number(new URL(relay.endpoint).port)], ...h1 === undefined ? [] : [h1.broker.port, h1.model.port]] })
     const profilePath = join(frozen, 'lumx-host.sb'); writeFileSync(profilePath, profile, { mode: 0o400 })
     const payload = { consumer: selectedConsumer, mode: input.mode, osHome, workspaceDirectory, sourceRoot, port, environment, nodePath, generation: randomUUID(),
+      ...qualificationDeclaration === undefined ? {} : { qualification: qualificationDeclaration },
       ...selectedConsumer === 'desktop-byok' ? { modelEndpoint: `${relay.endpoint}/chat/completions`, relayCapability: relay.capability } : {},
       ...selectedConsumer === 'external-qwen' ? { external: { artifactIdentity: externalOwner.artifactIdentity,
         eligibilityRoot: join(dataHome, 'external-agent-eligibility', 'v1'), engineId: externalOwner.engineId, mode: input.mode,
