@@ -18,14 +18,38 @@ export const turnBoundaryProjectionDefinition = {
   key: 'turnBoundary',
   stateVersion: 2,
   stateSchema: turnBoundaryProjectionSchema,
-  init: () => ({ openTurnStartSeq: null, lastStepStartSeq: null, lastStepBoundary: null, lastTurn: 0 }),
+  init: () => ({
+    openTurnStartSeq: null,
+    lastStepStartSeq: null,
+    lastStepBoundary: null,
+    lastTurn: 0,
+  }),
   apply: (state, event) => {
     switch (event.type) {
-      case 'turn/start': return { ...state, openTurnStartSeq: event.seq, lastTurn: event.data.turn }
-      case 'turn/end': return { ...state, openTurnStartSeq: null }
-      case 'step/start': return { ...state, lastStepStartSeq: event.seq, lastStepBoundary: { kind: 'start', seq: event.seq } }
-      case 'step/end': return { ...state, lastStepBoundary: { kind: 'end', seq: event.seq } }
-      default: return state
+      case 'turn/start':
+        return {
+          ...state,
+          openTurnStartSeq: event.seq,
+          lastTurn: event.data.turn,
+        }
+      case 'turn/end':
+        return {
+          ...state,
+          openTurnStartSeq: null,
+        }
+      case 'step/start':
+        return {
+          ...state,
+          lastStepStartSeq: event.seq,
+          lastStepBoundary: { kind: 'start', seq: event.seq },
+        }
+      case 'step/end':
+        return {
+          ...state,
+          lastStepBoundary: { kind: 'end', seq: event.seq },
+        }
+      default:
+        return state
     }
   },
 } satisfies ProjectionDefinition<'turnBoundary', TurnBoundaryProjection>

@@ -24,6 +24,7 @@ import type {} from './runtime-context.ts'
 export { CONFIGURED_AGENT_IDENTITIES_KEY } from './configuration.ts'
 export type { Config, ConfiguredAgentIdentities, LauncherAgentIdentity } from './configuration.ts'
 export { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from './constants.ts'
+export { inboxProjectionDefinition } from './inbox.ts'
 export { turnBoundaryProjectionDefinition } from './turn-boundary.ts'
 
 /** Concrete agent factory and driver service. */
