@@ -33,7 +33,8 @@ export async function prepareExternalEngineOwner(input) {
       forbiddenFiles: [leasePath], forbiddenSubpaths: [join(input.osHome, input.mode === 'developer' ? '.lumx' : '.lumx-developer', '.private')] })
   } catch (error) { await relay.dispose(); stateLease.release(); throw error }
   let callbacks
-  const engine = createSupervisedQwenEngine({ materials, relay, model: config.model,
+  const qualificationLedger = input.qualificationLedger === true
+  const engine = createSupervisedQwenEngine({ materials, relay, model: config.model, qualificationLedger,
     onUpdate: value => callbacks.onUpdate(value), onPermission: value => callbacks.onPermission(value), mcpServers: config.mcpServers ?? [] })
   let closing
   return Object.freeze({ artifactIdentity: config.qwenTreeSha256, engineId: config.engineId, materials, model: config.model,
@@ -52,6 +53,7 @@ export async function prepareExternalEngineOwner(input) {
       try { stateLease.release() } catch (error) { failures.push(error) }
       if (failures.length === 1) throw failures[0]
       if (failures.length > 1) throw new AggregateError(failures, 'external engine owner teardown failed')
+      if (!qualificationLedger) return undefined
       const launchedHandles = cleanup?.launchedHandles
       const terminalCleanup = cleanup?.terminalCleanup
       if (!Array.isArray(launchedHandles) || !Array.isArray(terminalCleanup) || launchedHandles.length !== terminalCleanup.length) {

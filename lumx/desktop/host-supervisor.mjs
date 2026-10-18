@@ -22,6 +22,7 @@ function withAbort(promise, signal) {
 /** Launch only caller-prepared and revalidated LUMX Host material. */
 export async function launchLumxHost(prepared, { beforeBootstrap } = {}) {
   const materials = verifyLumxHostLaunch(prepared)
+  if (beforeBootstrap !== undefined && typeof beforeBootstrap !== 'function') throw new Error('Host pre-bootstrap hook is invalid')
   const { externalOwner, input, nodePath, paths, payload, profile, relay } = materials
   const { bootstrap, configPath, hostEntry, processHome, profilePath, temporary } = paths
   const consumer = payload.consumer
@@ -50,24 +51,26 @@ export async function launchLumxHost(prepared, { beforeBootstrap } = {}) {
       bridge = createHostProcessBridge({ child, engine: externalOwner?.engine ?? unavailable, generation: payload.generation })
       bridge.ready.then(resolveReady, rejectReady)
     })
-    if (beforeBootstrap !== undefined) {
-      if (typeof beforeBootstrap !== 'function') throw new Error('Host pre-bootstrap hook is invalid')
-      await withTimeout(beforeBootstrap(Object.freeze({ pgid: child.pid, pid: child.pid })), input.startupTimeoutMs ?? 30_000, 'Host ownership acknowledgement')
-    }
-    child.stdin.write(BOOT_FRAME)
+    ready.catch(() => {})
     let readyValue
     try {
+      if (beforeBootstrap !== undefined) {
+        await withTimeout(beforeBootstrap(Object.freeze({ pgid: child.pid, pid: child.pid })), input.startupTimeoutMs ?? 30_000, 'Host ownership acknowledgement')
+      }
+      await new Promise((resolveWrite, rejectWrite) => child.stdin.write(BOOT_FRAME, error => error ? rejectWrite(error) : resolveWrite()))
       const startup = withTimeout(ready, input.startupTimeoutMs ?? 30_000, 'Host startup')
       readyValue = await withAbort(startup, input.signal)
-    } catch (error) {
-      child.stdin.end()
-      await Promise.race([exited, new Promise(resolveWait => setTimeout(resolveWait, 250))])
-      if (Number.isSafeInteger(child.pid)) { try { process.kill(-child.pid, 'SIGTERM') } catch {} }
-      await Promise.race([exited, new Promise(resolveWait => setTimeout(resolveWait, 2_000))])
-      if (Number.isSafeInteger(child.pid)) { try { process.kill(-child.pid, 'SIGKILL') } catch {} }
-      await exited
-      await materials.cleanup()
-      throw error
+    } catch (primary) {
+      const failures = [primary]
+      try { child.stdin.end() } catch (error) { failures.push(error) }
+      let stopped = await Promise.race([exited, new Promise(resolveWait => setTimeout(() => resolveWait(undefined), 250))])
+      if (stopped === undefined && Number.isSafeInteger(child.pid)) { try { process.kill(-child.pid, 'SIGTERM') } catch (error) { failures.push(error) } }
+      if (stopped === undefined) stopped = await Promise.race([exited, new Promise(resolveWait => setTimeout(() => resolveWait(undefined), 2_000))])
+      if (stopped === undefined && Number.isSafeInteger(child.pid)) { try { process.kill(-child.pid, 'SIGKILL') } catch (error) { failures.push(error) } }
+      try { if (stopped === undefined) await withTimeout(exited, 2_000, 'Host reap after failed pre-bootstrap handoff') } catch (error) { failures.push(error) }
+      try { await materials.cleanup() } catch (error) { failures.push(error) }
+      if (failures.length === 1) throw primary
+      throw new AggregateError(failures, 'Host launch failed before ready and cleanup also failed')
     }
     let stopping
     const stop = command => (stopping ??= (async () => {

@@ -103,7 +103,7 @@ async function main() {
     if (typeof materials.prepareLumxHostLaunch !== 'function' || typeof supervisor.launchLumxHost !== 'function' || typeof factory.makeB5HostLaunchInput !== 'function') throw new Error('controller module contract')
     const supplied = await factory.makeB5HostLaunchInput({ consumer, sourceAnchorSha256: source })
     if (!supplied?.launchInput) throw new Error('factory must supply the exact launch input')
-    retained = await materials.prepareLumxHostLaunch(supplied.launchInput)
+    retained = await materials.prepareLumxHostLaunch({ ...supplied.launchInput, qualificationLedger: consumer === 'external-qwen' })
     const rows = [
       row('host-profile', 'runtime-profile', role, retained.paths.profilePath, retained.anchors.profileSha256),
       row('host-config', 'runtime-config', role, retained.paths.configPath, retained.anchors.configFileSha256),

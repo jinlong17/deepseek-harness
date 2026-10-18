@@ -8,6 +8,7 @@ import { verifyQwenLaunch } from './qwen-launch-materials.mjs'
 
 const OPERATION_TIMEOUT_MS = 30_000
 const CALLBACK_LIMIT = 64
+const QUALIFICATION_LAUNCH_LIMIT = 8
 const UPDATE_TYPES = new Set(['user_message_chunk', 'agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update', 'plan', 'plan_update', 'plan_removed', 'available_commands_update', 'current_mode_update', 'config_option_update', 'session_info_update', 'usage_update', 'compaction_update', 'compaction_summary_chunk'])
 const TURN_UPDATE_TYPES = new Set(['user_message_chunk', 'agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update', 'plan', 'plan_update', 'plan_removed', 'usage_update', 'compaction_update', 'compaction_summary_chunk'])
 function timeout(promise, label, ms = OPERATION_TIMEOUT_MS) {
@@ -70,9 +71,9 @@ function signalName(number) {
 }
 
 /** Supervisor-owned official ACP client and Qwen process-group lifecycle. */
-export function createSupervisedQwenEngine({ materials, relay, model, mcpServers = [], onUpdate = () => {}, onPermission = async () => ({ outcome: { outcome: 'cancelled' } }) }) {
+export function createSupervisedQwenEngine({ materials, relay, model, mcpServers = [], onUpdate = () => {}, onPermission = async () => ({ outcome: { outcome: 'cancelled' } }), qualificationLedger = false }) {
   const handles = new Map(); const reservations = new Set(); const servers = fixedServers(mcpServers)
-  const launched = new Map(); const terminal = new Map()
+  const launched = qualificationLedger ? new Map() : undefined; const terminal = qualificationLedger ? new Map() : undefined
   let accepting = true; let launches = 0; let closing
 
   function assertActive(record, signal) {
@@ -82,15 +83,17 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
   }
   function reserve(handleId) {
     if (!accepting) throw new Error('Qwen engine is disposed')
-    if (handles.has(handleId) || reservations.has(handleId) || launched.has(handleId)) throw new Error('Qwen handle already exists')
+    if (handles.has(handleId) || reservations.has(handleId) || (qualificationLedger && launched.has(handleId))) throw new Error('Qwen handle already exists')
     reservations.add(handleId)
   }
   function terminalFailure(record, error) {
+    if (!qualificationLedger) return
     terminal.set(record.handleId, Object.freeze({ birth: record.birth, handleId: record.handleId,
       guardianPid: record.guardian.pid, qwenPid: record.qwenPid,
       state: 'cleanup-failed', error: String(error?.message ?? error) }))
   }
   function terminalSuccess(record, cleanup) {
+    if (!qualificationLedger) return
     if (!Number.isSafeInteger(record.qwenPid)) throw new Error('Qwen cleanup has no owned engine PID')
     terminal.set(record.handleId, Object.freeze({ birth: record.birth, handleId: record.handleId,
       guardianPid: record.guardian.pid, qwenPid: record.qwenPid, state: 'reaped', cleanup }))
@@ -134,6 +137,7 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
 
   async function launch(handleId, signal) {
     assertActive(undefined, signal)
+    if (qualificationLedger && launches >= QUALIFICATION_LAUNCH_LIMIT) throw new Error('Qwen qualification launch limit exceeded')
     verifyQwenLaunch(materials, { requireInitialState: launches === 0 && materials.initialState }); launches += 1
     assertActive(undefined, signal)
     const qwenArgv = ['/usr/bin/sandbox-exec', '-f', materials.paths.profilePath, materials.nodePath, '--expose-gc', materials.qwenCliPath, '--acp', '--auth-type=openai']
@@ -143,7 +147,7 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
     const guardian = spawn(materials.paths.guardian, qwenArgv, { cwd: materials.paths.workspace, env, stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'] })
     const guardianExited = outcome(guardian); guardian.once('error', () => {})
     const birth = launches
-    launched.set(handleId, Object.freeze({ birth, handleId, guardianPid: guardian.pid }))
+    if (qualificationLedger) launched.set(handleId, Object.freeze({ birth, handleId, guardianPid: guardian.pid }))
     const control = guardianControl(guardian.stdout); const guardianDiagnostic = captureBoundedTail(guardian.stderr)
     const qwenInput = guardian.stdio[3]; const qwenOutput = guardian.stdio[4]; const qwenError = guardian.stdio[5]
     const qwenDiagnostic = captureBoundedTail(qwenError); const boundedOutput = createBoundedNdjsonInput(); qwenOutput.pipe(boundedOutput)
@@ -170,7 +174,7 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
       boundedOutput.once('error', () => { void dispose({ handleId }) })
       assertActive(record, signal); guardian.stdin.write('S')
       record.qwenPid = await abortable(timeout(control.pid, 'Qwen guarded spawn', 5_000), signal)
-      launched.set(handleId, Object.freeze({ birth, handleId, guardianPid: guardian.pid, qwenPid: record.qwenPid }))
+      if (qualificationLedger) launched.set(handleId, Object.freeze({ birth, handleId, guardianPid: guardian.pid, qwenPid: record.qwenPid }))
       assertActive(record, signal)
       return record
     } catch (error) { await dispose({ handleId }).catch(() => {}); throw error }
@@ -306,6 +310,7 @@ export function createSupervisedQwenEngine({ materials, relay, model, mcpServers
       const failures = results.filter(result => result.status === 'rejected')
       try { await relay.dispose() } catch (error) { failures.push({ reason: error }) }
       if (failures.length > 0) throw new AggregateError(failures.map(result => result.reason), 'Qwen engine teardown failed')
+      if (!qualificationLedger) return Object.freeze({ handles: Object.freeze(results.map(result => result.value.cleanup)) })
       const launchesLedger = [...launched.values()].sort((first, second) => first.birth - second.birth)
       const terminalLedger = launchesLedger.map(row => terminal.get(row.handleId))
       if (terminalLedger.some(row => row === undefined || row.state !== 'reaped')) throw new Error('Qwen engine teardown has incomplete launch cleanup history')
