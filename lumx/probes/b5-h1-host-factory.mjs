@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { baseLaunch, check, freePort, loadConfig, pending, qualificationFacts, unit, writeResult } from './b5-hook-common.mjs'
 import { h1Stubs } from './b5-fixed-stubs.mjs'
 import { withB5FactoryCleanup } from './b5-factory-cleanup.mjs'
-import { privacyOriginalRowsInert } from './b5-host-privacy-qualification.mjs'
+import { privacyLifecycleComplete } from './b5-host-privacy-qualification.mjs'
 
 const config = loadConfig(); let stubs; let closePromise
 const count = (events, type) => events.filter(value => value === type).length
@@ -35,7 +35,7 @@ export async function runB5HostScenario({ host, runtimeAnchorSha256, qualificati
     const f = qualificationFacts(observed, 'h1-observe'); const wire = stubs.wire; const brokerCalls = calls(f.broker, 'lumx_broker'); const nativeCalls = calls(f.native, 'bash')
     const brokerResults = results(f.broker, brokerCalls.map(row => row.callId)); const nativeResults = results(f.native, nativeCalls.map(row => row.callId))
     const model = scenario => wire.model.filter(row => row.scenario === scenario); const names = value => value.map(row => row.name)
-    const inventories = Object.values(f.inventories); const privacyInert = privacyOriginalRowsInert(privacyFacts)
+    const inventories = Object.values(f.inventories); const privacyInert = privacyLifecycleComplete(privacyFacts)
     const canary = readFileSync(config.nativeCanaryPath, 'utf8')
     const checks = [
       check('runProfile-composition', host.consumer === 'governed-h1' && JSON.stringify(f.bundles) === JSON.stringify(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']), { consumer: host.consumer, bundles: f.bundles, loaderIds: f.loaderIds }),

@@ -81,16 +81,33 @@ test('privacy qualification keeps seven protected rows while exercising same-pac
     assert.equal(alias.updatedSameEntry, true)
     assert.equal(alias.absentInLoader, true)
     assert.equal(alias.absentInGroupData, true)
-    assert.equal(alias.enableOutcome, 'rejected-state')
+    assert.equal(alias.enableOutcome, 'governance-error')
+    assert.equal(alias.afterEnableSameEntry, true)
+    assert.equal(alias.afterEnableSameOptions, true)
+    assert.match(alias.enableError.message, /module aliases protected identity/u)
   }
   assert.deepEqual(facts.aliasCleanup.groupId, PRIVACY_ALIAS_GROUP_ID)
   assert.equal(facts.aliasCleanup.groupAbsent, true)
   assert.ok(facts.aliasCleanup.aliases.every(row => row.absent === true))
+  assert.equal(facts.lateEnable.rejected, true)
+  assert.match(facts.lateEnable.error.message, /include:product-analytics: protected row must remain disabled/u)
   assertOriginalRowsIntact(value.ctx, ids)
 
   assertStrictPredicateRejects(facts, value => { value.privacyIds = [] })
   assertStrictPredicateRejects(facts, value => { value.protectedActions[1].id = value.protectedActions[0].id })
+  assertStrictPredicateRejects(facts, value => { value.protectedActions[0].retained.package = 'cordis:timer' })
   assertStrictPredicateRejects(facts, value => { value.aliasActions[0].package = 'cordis:timer' })
+  assertStrictPredicateRejects(facts, value => {
+    const wrong = 'cordis:timer'
+    const id = value.protectedActions[0].id
+    value.protectedActions[0].package = wrong
+    for (const state of [value.protectedActions[0].before, value.protectedActions[0].updated, value.protectedActions[0].retained, value.initial.find(row => row.id === id), value.final.find(row => row.id === id)]) state.package = wrong
+    const alias = value.aliasActions[0]; alias.package = wrong
+    for (const state of [alias.created, alias.updated, alias.afterEnable, alias.reinstalled]) state.package = wrong
+  })
+  assertStrictPredicateRejects(facts, value => { value.aliasActions[0].updated.id = value.aliasActions[1].id })
+  assertStrictPredicateRejects(facts, value => { value.protectedActions[0].updated.identity.url = 'file:///wrong.mjs' })
+  assertStrictPredicateRejects(facts, value => { value.aliasActions[0].afterEnableSameOptions = false })
   assertStrictPredicateRejects(facts, value => { value.aliasActions[0].reinstalled.identity.url = '' })
   assertStrictPredicateRejects(facts, value => { value.aliasActions[0].updated.disabled = false })
   assertStrictPredicateRejects(facts, value => { value.aliasActions[0].absentInLoader = false })
@@ -138,6 +155,26 @@ test('privacy qualification cleans owned aliases and group after a mid-alias fai
   })
   await assert.rejects(qualifyPrivacyLifecycle(value.ctx), cause => cause === failure)
   assert.equal(updates, 5)
+  assert.equal(protectedEntry(value.ctx, PRIVACY_ALIAS_GROUP_ID), undefined)
+  assert.equal([...value.ctx.loader.entries()].some(entry => entry.options.id.startsWith('lumx-b5-privacy-alias-')), false)
+  assertOriginalRowsIntact(value.ctx, [
+    'session-log-deepseek', 'plugin-package-inventory-deepseek', 'session-telemetry-otel',
+    'deepseek-account', 'llm-deepseek-account', 'desktop-product-telemetry', 'product-analytics',
+  ])
+})
+
+test('privacy qualification removes its fixed group when create rejects after allocation', { timeout: 30_000 }, async t => {
+  const value = await runtime(t)
+  const loader = value.ctx.loader
+  const create = loader.create.bind(loader)
+  const failure = new Error('injected create rejection after allocation')
+  loader.create = async options => {
+    const created = await create(options)
+    if (options.id === PRIVACY_ALIAS_GROUP_ID) throw failure
+    return created
+  }
+  t.after(() => { loader.create = create })
+  await assert.rejects(qualifyPrivacyLifecycle(value.ctx), cause => cause === failure)
   assert.equal(protectedEntry(value.ctx, PRIVACY_ALIAS_GROUP_ID), undefined)
   assert.equal([...value.ctx.loader.entries()].some(entry => entry.options.id.startsWith('lumx-b5-privacy-alias-')), false)
   assertOriginalRowsIntact(value.ctx, [
