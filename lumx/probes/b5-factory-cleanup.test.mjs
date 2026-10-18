@@ -187,7 +187,29 @@ test('desktop governance capability requires exact policy rows, desktop consumer
 await makeB5HostLaunchInput({ consumer: 'desktop-byok', sourceAnchorSha256: 'e'.repeat(64) });
 const packages = ${JSON.stringify(packages)};
 const rows = Object.entries(packages).map(([id, specifier], index) => ({ id, specifier, identity: { format: 'module', generation: index + 1, url: 'file:///fixed/' + id + '.mjs' } }));
-const facts = () => ({ governance: { ready: true, rows: structuredClone(rows) }, protectedActions: rows.map(row => ({ id: row.id, package: row.specifier, packageIdentity: structuredClone(row.identity) })), candidates: rows.map(row => ({ id: row.id, protectedId: row.id, name: row.specifier, identity: structuredClone(row.identity), disabled: true, fiberPresent: false })) });
+const state = (id, row, fingerprint) => ({ present: true, resolved: true, id, package: row.specifier,
+  identity: structuredClone(row.identity), optionsFingerprint: fingerprint, disabled: true, fiberPresent: false,
+  fiberState: null, unevaluated: true });
+const facts = () => {
+  const protectedActions = rows.map(row => { const fingerprint = JSON.stringify({ id: row.id, name: row.specifier, disabled: true }); const before = state(row.id, row, fingerprint); return {
+    id: row.id, kind: 'protected-original', executed: true, package: row.specifier, packageIdentity: structuredClone(row.identity),
+    before, updated: structuredClone(before), retained: structuredClone(before), removeRejected: true,
+    removalError: { message: 'LUMX governance denied include:' + row.id + ': protected row cannot be removed' }, retainedSameEntry: true, retainedSameOptions: true,
+  }; });
+  const aliasActions = rows.map((row, index) => { const id = 'lumx-b5-privacy-alias-' + row.id; const fingerprint = JSON.stringify({ id, name: row.specifier, disabled: true }); const value = state(id, row, fingerprint); const aliasEntryId = 'lumx-b5-privacy-alias-group:' + id; return {
+    id, kind: 'qualification-child-alias', originalId: row.id, package: row.specifier, packageIdentity: structuredClone(row.identity), executed: true,
+    created: value, updated: structuredClone(value), afterEnable: structuredClone(value), reinstalled: structuredClone(value), updatedSameEntry: true,
+    afterEnableSameEntry: true, afterEnableSameOptions: true, enableOutcome: 'governance-error', aliasEntryId,
+    enableError: { message: 'LUMX governance denied ' + aliasEntryId + ': module aliases protected identity ' + row.identity.url },
+    absentInLoader: true, absentInGroupData: true,
+  }; });
+  const initial = protectedActions.map(row => structuredClone(row.before)); const final = structuredClone(initial);
+  return { privacyIds: Object.keys(packages), initial, final, governance: { ready: true, rows: structuredClone(rows) }, protectedActions,
+    aliasActions, aliasCleanup: { groupId: 'lumx-b5-privacy-alias-group', groupAbsent: true, aliases: aliasActions.map(row => ({ id: row.id, originalId: row.originalId, absent: true })) },
+    candidates: rows.map(row => ({ id: row.id, protectedId: row.id, name: row.specifier, identity: structuredClone(row.identity), disabled: true, fiberPresent: false })),
+    lateEnable: { rejected: true },
+  };
+};
 const positive = { modelRequests: 1, response: { status: 'pass' } };
 const evaluate = (consumer, mutate, byok = positive) => { const privacyFacts = facts(); mutate?.(privacyFacts); return desktopGovernanceByokReady({ consumer, privacyFacts, positive: byok }); };
 const results = {
@@ -198,6 +220,8 @@ const results = {
   duplicateAction: evaluate('desktop-byok', value => { value.protectedActions[1].id = value.protectedActions[0].id; }),
   malformed: evaluate('desktop-byok', value => { value.governance.rows[0].identity.url = ''; }),
   failedGuard: evaluate('desktop-byok', value => { value.governance.ready = false; }),
+  failedRemovalGuard: evaluate('desktop-byok', value => { value.protectedActions[0].removeRejected = false; }),
+  failedLateEnable: evaluate('desktop-byok', value => { value.lateEnable.rejected = false; }),
   wrongConsumer: evaluate('governed-h1'),
   absentByok: evaluate('desktop-byok', undefined, { modelRequests: 0, response: { status: 'pass' } }),
 };
@@ -206,7 +230,8 @@ process.stdout.write(JSON.stringify(results));`)
   const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])
   assert.equal(result.code, 0, result.stderr)
   assert.deepEqual(JSON.parse(result.stdout), {
-    exact: true, missing: false, extra: false, duplicate: false, duplicateAction: false, malformed: false, failedGuard: false, wrongConsumer: false, absentByok: false,
+    exact: true, missing: false, extra: false, duplicate: false, duplicateAction: false, malformed: false, failedGuard: false,
+    failedRemovalGuard: false, failedLateEnable: false, wrongConsumer: false, absentByok: false,
   })
 })
 
@@ -258,6 +283,10 @@ try {
 
 test('desktop main stops qualification after an isolation failure', async () => {
   const state = await fixture('desktop-isolation-failure', 'desktop-main')
+  const targets = [0, 1, 2, 3, 10, 11, 512]
+  state.config.fdQualification = { schema: 'g9-b5-desktop-fd-qualification/v1', targets, controlFds: { ready: 20, ack: 21, diagnostic: 22, receipt: 23 },
+    canary: { path: state.config.nativeCanaryPath, dev: 1, ino: 1, bytes: 6, sha256: 'a'.repeat(64) }, protectedPaths: [], preexecReceiptPath: join(state.directory, 'preexec.json') }
+  await writeFile(state.configPath, JSON.stringify(state.config)); state.configSha256 = await sha256(state.configPath)
   const script = join(state.directory, 'desktop-isolation-failure-child.mjs')
   await writeFile(script, `import { createServer } from 'node:http';
 import { makeB5HostLaunchInput, runB5HostScenario } from ${JSON.stringify(pathToFileURL(modulePath('b5-desktop-host-factory.mjs')).href)};
@@ -267,9 +296,11 @@ const server = createServer((request, response) => {
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const port = server.address().port; const calls = [];
+const targets = ${JSON.stringify([0, 1, 2, 3, 10, 11, 512])}; const witness = stage => ({ schema: 'g9-b5-fd-attacker-witness/v1', stage, pid: process.pid, targets,
+  observations: targets.map(fd => ({ fd, identityMatched: true, contentMatched: true })) });
 await makeB5HostLaunchInput({ consumer: 'desktop-byok', sourceAnchorSha256: 'e'.repeat(64) });
 try {
-  await runB5HostScenario({ host: { consumer: 'desktop-byok', readyUrl: 'http://127.0.0.1:' + port + '/', control: { qualify: async ({ operation }) => { calls.push(operation); return { type: 'qualify', status: 'fail', error: 'synthetic isolation failure' }; } } }, runtimeAnchorSha256: 'f'.repeat(64), qualification: {} });
+  await runB5HostScenario({ host: { consumer: 'desktop-byok', readyUrl: 'http://127.0.0.1:' + port + '/', control: { qualify: async ({ operation }) => { calls.push(operation); return { type: 'qualify', status: 'fail', error: 'synthetic isolation failure' }; } } }, runtimeAnchorSha256: 'f'.repeat(64), qualification: {}, fdAdversarial: { beforeImports: witness('beforeImports'), beforeLaunch: witness('beforeLaunch') } });
 } catch (error) { process.stdout.write(JSON.stringify({ calls, message: error.message })); }
 finally { await new Promise(resolve => server.close(resolve)); }`)
   const result = await runNode(script, ['--scenario-config', state.configPath, '--scenario-config-sha256', state.configSha256])

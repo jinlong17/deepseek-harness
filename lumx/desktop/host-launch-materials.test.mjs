@@ -66,3 +66,12 @@ test('prepared selected data home rejects replacement by a symbolic alias', asyn
   const original = `${materials.dataHome}.original`; renameSync(materials.dataHome, original); symlinkSync(original, materials.dataHome)
   assert.throws(() => verifyLumxHostLaunch(materials), /dataHome must be a direct directory/)
 })
+
+test('FD qualification is absent by default and rejects empty or fabricated canary metadata', async t => {
+  const input = base(t); const normal = await prepareLumxHostLaunch({ ...input, port: await freePort() }); cleanup(t, input, normal)
+  assert.equal(normal.payload.fdQualified, false)
+  assert.deepEqual(normal.payload.fdTargets, [])
+  assert.equal('canary' in normal.payload, false)
+  const invalid = base(t); t.after(() => rmSync(invalid.root, { recursive: true, force: true }))
+  await assert.rejects(prepareLumxHostLaunch({ ...invalid, fdQualification: { canary: {}, protectedPaths: [], targets: [] }, port: await freePort() }), /FD qualification/)
+})

@@ -68,12 +68,14 @@ pipe.closed.then(() => shutdown().then(() => process.exit(0), () => process.exit
 process.once('SIGTERM', () => { void shutdown().then(() => process.exit(0), () => process.exit(1)) })
 
 try {
-  const fdObservation = observeFileDescriptors(input.fdTargets, input.canary); const childFdObservation = await childObservation(input.nodePath, { targets: input.fdTargets, canary: input.canary })
-  let pathError; try { readFileSync(input.canary.path) } catch (error) { pathError = error.code ?? error.name }
+  const fdQualified = input.fdQualified === true && input.canary !== undefined
+  const fdObservation = fdQualified ? observeFileDescriptors(input.fdTargets, input.canary) : []
+  const childFdObservation = fdQualified ? await childObservation(input.nodePath, { targets: input.fdTargets, canary: input.canary }) : { qualified: false, observations: [] }
+  let pathError; if (fdQualified) try { readFileSync(input.canary.path) } catch (error) { pathError = error.code ?? error.name }
   const protectedPathErrors = {}; for (const path of input.protectedPaths) { try { readFileSync(path); protectedPathErrors[path] = 'READABLE' } catch (error) { protectedPathErrors[path] = error.code ?? error.name } }
   runtime = await launchLumxRuntimeInProcess({ consumer: input.consumer, qualification: input.qualification, mode: input.mode, osHome: input.osHome, workspaceDirectory: input.workspaceDirectory, sourceRoot: input.sourceRoot, port: input.port, environment: input.environment,
     ...input.consumer === 'desktop-byok' ? { auth: { byokKey: input.relayCapability, endpoint: input.modelEndpoint, relayOnly: true } } : {},
     ...input.consumer === 'external-qwen' ? { external: { acp, ...input.external, engine: remoteEngine } } : {},
     ...input.consumer === 'governed-h1' ? { h1: input.h1 } : {} })
-  await pipe.send({ channel: 'control', type: 'ready', payload: { pid: process.pid, baseUrl: runtime.baseUrl, readyUrl: runtime.readyUrl, consumer: runtime.consumer, surface: runtime.surface, governance: runtime.governance, fdObservation, childFdObservation, canaryPathError: pathError, protectedPathErrors, configSha256: sha256(configBytes) } })
+  await pipe.send({ channel: 'control', type: 'ready', payload: { pid: process.pid, baseUrl: runtime.baseUrl, readyUrl: runtime.readyUrl, consumer: runtime.consumer, surface: runtime.surface, governance: runtime.governance, fdQualification: { qualified: fdQualified, targets: input.fdTargets }, fdObservation, childFdObservation, canaryPathError: pathError, protectedPathErrors, configSha256: sha256(configBytes) } })
 } catch (error) { process.stderr.write(`lumx-host-entry:${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); await shutdown().catch(() => {}); process.exit(1) }

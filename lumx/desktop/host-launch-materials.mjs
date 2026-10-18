@@ -58,6 +58,26 @@ function launchEnvironment(value = {}) {
   for (const [name, setting] of Object.entries(value)) if (!allowed.has(name) || typeof setting !== 'string') throw new Error(`Host environment entry is not allowed: ${name}`)
   return { ...value }
 }
+function fdQualification(value) {
+  if (value === undefined || value !== null && typeof value === 'object' && Object.keys(value).length === 0) return undefined
+  if (value === null || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).sort().join(',') !== 'canary,protectedPaths,targets') throw new Error('FD qualification is invalid')
+  const targets = value.targets
+  if (JSON.stringify(targets) !== JSON.stringify([0, 1, 2, 3, 10, 11, 512])) throw new Error('FD qualification targets are invalid')
+  const canary = value.canary
+  if (canary === null || typeof canary !== 'object' || Array.isArray(canary)
+      || Object.keys(canary).sort().join(',') !== 'bytes,dev,ino,path,sha256'
+      || !isAbsolute(canary.path) || !Number.isSafeInteger(canary.dev) || canary.dev < 0
+      || !Number.isSafeInteger(canary.ino) || canary.ino <= 0 || !Number.isSafeInteger(canary.bytes)
+      || canary.bytes < 1 || canary.bytes > 4096 || !/^[a-f0-9]{64}$/u.test(canary.sha256)) throw new Error('FD qualification canary is invalid')
+  const path = plainFile(canary.path, 'FD qualification canary'); const metadata = statSync(path); const bytes = readFileSync(path)
+  if (metadata.dev !== canary.dev || metadata.ino !== canary.ino || bytes.length !== canary.bytes || sha256(bytes) !== canary.sha256) throw new Error('FD qualification canary differs from caller anchor')
+  if (!Array.isArray(value.protectedPaths) || value.protectedPaths.length > 16
+      || new Set(value.protectedPaths).size !== value.protectedPaths.length
+      || value.protectedPaths.some(item => typeof item !== 'string' || !isAbsolute(item))
+      || !value.protectedPaths.includes(path)) throw new Error('FD qualification protected paths are invalid')
+  return Object.freeze({ canary: Object.freeze({ ...canary, path }), protectedPaths: Object.freeze([...value.protectedPaths]), targets: Object.freeze([...targets]) })
+}
 function overlaps(first, second) {
   const inside = (candidate, parent) => { const value = relative(parent, candidate); return value === '' || (value !== '..' && !value.startsWith(`..${sep}`) && !isAbsolute(value)) }
   return inside(first, second) || inside(second, first)
@@ -95,6 +115,7 @@ export async function prepareLumxHostLaunch(input) {
   const workspaceDirectory = directory(realpathSync(input.workspaceDirectory), 'Host workspace').path
   const dataHome = dataHomeFor(input.mode, osHome, workspaceDirectory); const port = tcpPort(input.port)
   const selectedConsumer = consumer(input.consumer); const environment = launchEnvironment(input.environment)
+  const fd = fdQualification(input.fdQualification)
   const qualificationDeclaration = qualification(input.qualification, selectedConsumer)
   const model = selectedConsumer === 'desktop-byok' ? loopback(input.auth?.endpoint, 'model endpoint') : undefined
   const h1 = selectedConsumer === 'governed-h1' ? { broker: loopback(input.h1?.brokerEndpoint, 'H1 Broker endpoint'), model: loopback(input.h1?.modelEndpoint, 'H1 model endpoint') } : undefined
@@ -120,8 +141,8 @@ export async function prepareLumxHostLaunch(input) {
         eligibilityRoot: join(dataHome, 'external-agent-eligibility', 'v1'), engineId: externalOwner.engineId, mode: input.mode,
         model: externalOwner.model, persistenceRoot: join(dataHome, 'sessions') } } : {},
       ...selectedConsumer === 'governed-h1' ? { h1: { brokerEndpoint: h1.broker.url, modelEndpoint: h1.model.url } } : {},
-      fdTargets: input.fdQualification?.targets ?? [0, 3, 10, 11, 512], canary: input.fdQualification?.canary ?? { path: join(runtime, 'absent-canary'), dev: -1, ino: -1, bytes: 0, sha256: sha256('') },
-      protectedPaths: input.fdQualification?.protectedPaths ?? [] }
+      fdQualified: fd !== undefined, fdTargets: fd?.targets ?? [], ...fd === undefined ? {} : { canary: fd.canary },
+      protectedPaths: fd?.protectedPaths ?? [] }
     const config = { version: 2, configSha256: sha256(Buffer.from(JSON.stringify(payload))), payload }
     const configPath = join(frozen, 'host-config.json'); writeFileSync(configPath, `${JSON.stringify(config)}\n`, { mode: 0o400 })
     chmodSync(bootstrap, 0o500); chmodSync(frozen, 0o500)

@@ -1,10 +1,11 @@
 /* B5 test-harness draft. Do not execute before B5 writer handoff. */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { createReadStream, createWriteStream, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { createReadStream, createWriteStream, lstatSync, readFileSync, realpathSync, statSync, writeSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 
 import { closeB5HostOwners, requireB5HostFactory } from './b5-factory-cleanup.mjs'
+import { observeB5ControllerFds } from './b5-controller-fd-witness.mjs'
 import { verifyB5HostOwnershipAck } from './b5-owner-protocol.mjs'
 
 const MAX_FRAME = 64 * 1024
@@ -23,6 +24,11 @@ function fd(name) { const value = Number(arg(name)); if (!Number.isInteger(value
 function same(left, right) { const a = Buffer.from(left); const b = Buffer.from(right); return a.length === b.length && timingSafeEqual(a, b) }
 function canonical(value) { return JSON.stringify(value, Object.keys(value).sort()) }
 function primaryRole(consumer) { return consumer === 'governed-h1' ? 'h1-grant' : 'host' }
+function diagnosticFd() {
+  if (args['diagnostic-fd'] === undefined) return 2
+  if (args['diagnostic-fd'] !== '22') throw new Error('adversarial diagnostic FD is invalid')
+  return 22
+}
 
 function direct(path, label) {
   const entry = lstatSync(path)
@@ -82,6 +88,9 @@ async function main() {
   const ack = createReadStream(null, { fd: fd('ack-fd'), autoClose: true })
   let retained; let host; let factory; let primary
   try {
+    const beforeImports = args['diagnostic-fd'] === undefined ? undefined : observeB5ControllerFds({
+      configPath: arg('scenario-config'), configSha256: hex(arg('scenario-config-sha256'), 'scenario config'), stage: 'beforeImports',
+    })
     const materials = await import(pathToFileURL(resolve(arg('materials-module'))).href)
     const supervisor = await import(pathToFileURL(resolve(arg('supervisor-module'))).href)
     factory = requireB5HostFactory(await import(pathToFileURL(resolve(arg('factory-module'))).href))
@@ -110,10 +119,14 @@ async function main() {
       controller_entry_sha256: fileHash(SELF), consumer, runtime_role: role, port_reservation: true,
       materials: rows, preparation_anchor_sha256: preparation,
       launch_argv: [retained.paths.bootstrap, '/usr/bin/sandbox-exec', retained.paths.profilePath, retained.nodePath, retained.paths.hostEntry, retained.paths.configPath],
+      ...beforeImports === undefined ? {} : { fd_adversarial: beforeImports },
     })
     await write(ready, readyFrame)
     const ackFrame = await read(ack, ackTimeout(args['ack-timeout-ms']))
     verifyAck(ackFrame, readyFrame)
+    const beforeLaunch = beforeImports === undefined ? undefined : observeB5ControllerFds({
+      configPath: arg('scenario-config'), configSha256: hex(arg('scenario-config-sha256'), 'scenario config'), stage: 'beforeLaunch',
+    })
     let ownership
     host = await supervisor.launchLumxHost(retained, { beforeBootstrap: async owner => {
       if (!Number.isSafeInteger(owner?.pid) || !Number.isSafeInteger(owner?.pgid) || owner.pid !== owner.pgid) {
@@ -131,8 +144,9 @@ async function main() {
       pgid: ownership.pgid, profileSha256: host.hostProfile.sha256, role }), materials: Object.freeze(rows.map(value => Object.freeze({
       materialId: value.material_id, materialType: value.material_type, role: value.role, sha256: value.sha256,
     }))), runtimeAnchorSha256: ackFrame.runtime_anchor_sha256 })
-    await factory.runB5HostScenario({ host, qualification, runtimeAnchorSha256: ackFrame.runtime_anchor_sha256 })
+    await factory.runB5HostScenario({ host, qualification, runtimeAnchorSha256: ackFrame.runtime_anchor_sha256,
+      ...beforeImports === undefined ? {} : { fdAdversarial: Object.freeze({ beforeImports, beforeLaunch }) } })
   } catch (error) { primary = error } finally { ready.destroy(); ack.destroy() }
   await closeB5HostOwners({ retained, host, factory, primary })
 }
-main().catch(error => { process.stderr.write(`B5 retained-material controller: ${error.stack ?? error.message}\n`); process.exitCode = 1 })
+main().catch(error => { writeSync(diagnosticFd(), `B5 retained-material controller: ${error.stack ?? error.message}\n`); process.exitCode = 1 })
