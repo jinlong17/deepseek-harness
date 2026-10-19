@@ -59,7 +59,8 @@ export async function launchLumxHost(prepared, { beforeBootstrap } = {}) {
         rejectReady(error)
       })
       const unavailable = Object.freeze({ admit() { throw new Error('engine channel is unavailable') }, create() { throw new Error('engine channel is unavailable') }, load() { throw new Error('engine channel is unavailable') }, prompt() { throw new Error('engine channel is unavailable') }, cancel() {}, dispose() {} })
-      bridge = createHostProcessBridge({ child, engine: externalOwner?.engine ?? unavailable, generation: payload.generation })
+      bridge = createHostProcessBridge({ child, engine: externalOwner?.engine ?? unavailable, generation: payload.generation,
+        ...relay === undefined ? {} : { admitOtherProvider: async ({ signal }) => { await relay.admit('prompt', signal) } } })
       bridge.ready.then(resolveReady, rejectReady)
     })
     ready.catch(() => {})
@@ -84,13 +85,17 @@ export async function launchLumxHost(prepared, { beforeBootstrap } = {}) {
       throw new AggregateError(failures, 'Host launch failed before ready and cleanup also failed')
     }
     let stopping
-    const stop = command => (stopping ??= (async () => {
+    const stop = command => {
+      bridge.sealAdmission(new Error('Host is shutting down'))
+      return (stopping ??= (async () => {
       const deadline = performance.now() + SHUTDOWN_GRACE_MS
-      const failures = []; let control; let outcome; let cleanup
+      const failures = []; let bridgeClosing; let control; let outcome; let cleanup
       if (command !== undefined) {
         try { control = await bridge.request({ command }, 'Host shutdown', Math.max(1, remainingMs(deadline))) } catch (error) { failures.push(error) }
+        bridgeClosing = bridge.close(); bridgeClosing.catch(() => {})
       } else {
-        try { await withTimeout(bridge.close(), Math.max(1, remainingMs(deadline)), 'Host bridge close') } catch (error) { failures.push(error) }
+        bridgeClosing = bridge.close()
+        try { await withTimeout(bridgeClosing, Math.max(1, remainingMs(deadline)), 'Host bridge close') } catch (error) { failures.push(error) }
       }
       outcome = await waitUntil(exited, deadline)
       if (outcome === undefined) {
@@ -101,7 +106,7 @@ export async function launchLumxHost(prepared, { beforeBootstrap } = {}) {
         try { process.kill(-child.pid, 'SIGKILL') } catch (error) { appendFailure(failures, error) }
         try { outcome = await withTimeout(exited, SIGNAL_GRACE_MS, 'Host reap after SIGKILL') } catch (error) { failures.push(error) }
       }
-      try { await bridge?.close() } catch (error) { failures.push(error) }
+      try { await (bridgeClosing ?? bridge?.close()) } catch (error) { failures.push(error) }
       try { cleanup = await materials.cleanup() } catch (error) { failures.push(error) }
       if (failures.length > 0) {
         const failure = new AggregateError(failures, 'Host shutdown failed after bounded process cleanup')
@@ -109,7 +114,8 @@ export async function launchLumxHost(prepared, { beforeBootstrap } = {}) {
         throw failure
       }
       return { ...outcome, ...(command === undefined ? {} : { control }), ...(cleanup === undefined ? {} : { ownerCleanup: cleanup.externalCleanup }) }
-    })())
+      })())
+    }
     const shutdown = () => stop('shutdown')
     const disconnect = () => stop(undefined)
     const requestControl = (command, timeoutLabel, timeoutMs) => {

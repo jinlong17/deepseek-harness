@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { createEngineRpcPeer } from '../drivers/acp/engine-rpc.mjs'
 import { launchLumxRuntimeInProcess } from '../runtime/internal-launch.mjs'
 import { createAcpByteTransport } from './acp-byte-transport.mjs'
+import { createByokAdmissionClient } from './byok-admission-peer.mjs'
 import { observeFileDescriptors } from './fd-observer.mjs'
 import { createTypedPipe } from './typed-pipe.mjs'
 
@@ -33,6 +34,7 @@ let runtime; let stopping; let rpc
 const pipe = createTypedPipe({ readable: process.stdin, writable: process.stdout, generation: input.generation, incomingDirection: 'supervisor-to-host', outgoingDirection: 'host-to-supervisor', onFrame,
   endWritableOnClose: false })
 const acp = createAcpByteTransport(pipe)
+const admission = createByokAdmissionClient({ pipe })
 const remoteEngine = Object.freeze({
   create: (value, options) => rpc.request('create', value, options),
   load: (value, options) => rpc.request('load', value, options), prompt: (value, options) => rpc.request('prompt', value, options),
@@ -58,13 +60,22 @@ async function command(frame) {
   throw new Error('Host control command is invalid')
 }
 function onFrame(frame) {
-  if (acp.accept(frame) || rpc.onFrame(frame)) return
+  if (admission.onFrame(frame) || acp.accept(frame) || rpc.onFrame(frame)) return
   if (frame.channel !== 'control' || frame.type !== 'command') throw new Error('Host received an unsupported frame')
   const stoppingCommand = frame.payload?.command === 'shutdown'
+  if (stoppingCommand) admission.seal()
   void command(frame).then(value => pipe.send({ channel: 'control', type: 'response', requestId: frame.requestId, payload: { ok: true, value } }), error => pipe.send({ channel: 'control', type: 'response', requestId: frame.requestId, payload: { ok: false, error: error instanceof Error ? error.message : String(error) } }))
     .finally(() => { if (stoppingCommand) setImmediate(() => void shutdown().then(() => process.exit(0), () => process.exit(1))) })
 }
-const shutdown = () => (stopping ??= (async () => { await runtime?.shutdown(); await rpc.close(); await pipe.close().catch(() => {}) })())
+const shutdown = () => {
+  admission.seal()
+  return (stopping ??= (async () => {
+    const results = await Promise.allSettled([runtime?.shutdown(), admission.close(), rpc.close()])
+    try { await pipe.close() } catch (error) { results.push({ status: 'rejected', reason: error }) }
+    const failures = results.filter(result => result.status === 'rejected')
+    if (failures.length > 0) throw new AggregateError(failures.map(result => result.reason), 'Host shutdown failed')
+  })())
+}
 pipe.closed.then(() => shutdown().then(() => process.exit(0), () => process.exit(1)), () => shutdown().then(() => process.exit(1), () => process.exit(1)))
 process.once('SIGTERM', () => { void shutdown().then(() => process.exit(0), () => process.exit(1)) })
 
@@ -75,7 +86,7 @@ try {
   let pathError; if (fdQualified) try { readFileSync(input.canary.path) } catch (error) { pathError = error.code ?? error.name }
   const protectedPathErrors = {}; for (const path of input.protectedPaths) { try { readFileSync(path); protectedPathErrors[path] = 'READABLE' } catch (error) { protectedPathErrors[path] = error.code ?? error.name } }
   runtime = await launchLumxRuntimeInProcess({ consumer: input.consumer, qualification: input.qualification, mode: input.mode, osHome: input.osHome, workspaceDirectory: input.workspaceDirectory, sourceRoot: input.sourceRoot, port: input.port, environment: input.environment,
-    ...input.consumer === 'desktop-byok' ? { auth: { byokKey: input.relayCapability, endpoint: input.modelEndpoint, relayOnly: true } } : {},
+    ...input.consumer === 'desktop-byok' ? { auth: { admitOtherProvider: admission.admitOtherProvider, byokKey: input.relayCapability, endpoint: input.modelEndpoint, relayOnly: true } } : {},
     ...input.consumer === 'external-qwen' ? { external: { acp, ...input.external, engine: remoteEngine } } : {},
     ...input.consumer === 'governed-h1' ? { h1: input.h1 } : {} })
   await pipe.send({ channel: 'control', type: 'ready', payload: { pid: process.pid, baseUrl: runtime.baseUrl, readyUrl: runtime.readyUrl, consumer: runtime.consumer, surface: runtime.surface, governance: runtime.governance, fdQualification: { qualified: fdQualified, targets: input.fdTargets }, fdObservation, childFdObservation, canaryPathError: pathError, protectedPathErrors, configSha256: sha256(configBytes) } })

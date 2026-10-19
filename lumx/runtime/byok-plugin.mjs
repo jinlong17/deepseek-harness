@@ -23,13 +23,17 @@ function loopbackEndpoint(value) {
 /**
  * Install memory-only identity and BYOK state for one runProfile composition.
  *
- * @param {{ runtimeId: string, byokKey: string, endpoint: string, gateway?: object, getIdentity?(): object | undefined, now?(): Date, relayOnly?: boolean }} input
+ * @param {{ runtimeId: string, byokKey: string, endpoint: string, gateway?: object, getIdentity?(): object | undefined, now?(): Date,
+ *   relayOnly?: boolean, admitOtherProvider?(options: { signal?: AbortSignal }): Promise<void> }} input
  */
 export function installLumxByokRuntime(input) {
   if (RUNTIMES.has(input.runtimeId)) throw new Error(`LUMX runtime already installed: ${input.runtimeId}`)
-  const state = Object.freeze({ ...input, endpoint: loopbackEndpoint(input.endpoint) })
+  if (input.relayOnly === true && typeof input.admitOtherProvider !== 'function') throw new Error('relay-only BYOK runtime requires supervisor admission')
+  if (input.relayOnly !== true && (typeof input.getIdentity !== 'function' || input.gateway === undefined)) throw new Error('in-process BYOK runtime requires identity admission')
+  const lifecycle = { accepting: true }
+  const state = Object.freeze({ ...input, endpoint: loopbackEndpoint(input.endpoint), lifecycle })
   RUNTIMES.set(input.runtimeId, state)
-  return () => { RUNTIMES.delete(input.runtimeId) }
+  return () => { lifecycle.accepting = false; RUNTIMES.delete(input.runtimeId) }
 }
 
 async function modelReply(state, options) {
@@ -57,9 +61,12 @@ export async function apply(ctx, config) {
   if (state === undefined) throw new Error('LUMX BYOK runtime state is unavailable')
   const observations = []
   ADMISSION_OBSERVATIONS.set(ctx.root ?? ctx, observations)
-  ctx.on('llm/stream', async function * (_options, next) {
+  ctx.on('llm/stream', async function * (options, next) {
     try {
-      if (!state.relayOnly) {
+      if (!state.lifecycle.accepting) throw new Error('LUMX BYOK runtime is closing')
+      if (state.relayOnly && options.provider !== 'lumx-byok') {
+        await state.admitOtherProvider({ signal: options.signal })
+      } else if (!state.relayOnly) {
         await admitLumxByok({
           byokKey: state.byokKey,
           gateway: state.gateway,
@@ -67,7 +74,9 @@ export async function apply(ctx, config) {
           now: state.now?.(),
         })
       }
-      observations.push({ ordinal: observations.length + 1, result: 'admitted' })
+      options.signal?.throwIfAborted()
+      if (!state.lifecycle.accepting) throw new Error('LUMX BYOK runtime is closing')
+      observations.push({ ordinal: observations.length + 1, result: state.relayOnly && options.provider === 'lumx-byok' ? 'deferred' : 'admitted' })
     } catch (error) {
       observations.push({
         ordinal: observations.length + 1, result: 'denied',

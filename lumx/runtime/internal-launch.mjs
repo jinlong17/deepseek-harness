@@ -24,7 +24,8 @@ function sourceModule(sourceRoot, relativePath) {
  * This is private distribution glue, not the complete Electron Developer Host wrapper.
  *
  * @param {{ consumer?: 'desktop-byok' | 'platform-stub', mode: 'consumer' | 'developer', osHome: string, workspaceDirectory: string, sourceRoot: string,
- *   port: number, auth?: { byokKey: string, endpoint: string, gateway: object, getIdentity(): object | undefined, now?(): Date },
+ *   port: number, auth?: { byokKey: string, endpoint: string, gateway?: object, getIdentity?(): object | undefined, now?(): Date,
+ *     relayOnly?: boolean, admitOtherProvider?(options: { signal?: AbortSignal }): Promise<void> },
  *   environment?: Record<string, string> }} input
  */
 export async function launchLumxRuntimeInProcess(input) {

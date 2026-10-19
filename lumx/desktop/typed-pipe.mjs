@@ -3,11 +3,11 @@ const MAX_FRAME_BYTES = 1024 * 1024
 const MAX_QUEUE_BYTES = 4 * MAX_FRAME_BYTES
 const MAX_QUEUE_FRAMES = 256
 const WRITE_DEADLINE_MS = 5_000
-const CHANNELS = new Set(['acp', 'control', 'engine'])
+const CHANNELS = new Set(['acp', 'admission', 'control', 'engine'])
 const DIRECTIONS = new Set(['host-to-supervisor', 'supervisor-to-host'])
 const TYPES = Object.freeze({
-  'host-to-supervisor': Object.freeze({ acp: new Set(['bytes', 'eof']), control: new Set(['ready', 'response']), engine: new Set(['cancel', 'dispose', 'request', 'response']) }),
-  'supervisor-to-host': Object.freeze({ acp: new Set(['bytes', 'eof']), control: new Set(['command']), engine: new Set(['cancel', 'dispose', 'event', 'request', 'response']) }),
+  'host-to-supervisor': Object.freeze({ acp: new Set(['bytes', 'eof']), admission: new Set(['cancel', 'request']), control: new Set(['ready', 'response']), engine: new Set(['cancel', 'dispose', 'request', 'response']) }),
+  'supervisor-to-host': Object.freeze({ acp: new Set(['bytes', 'eof']), admission: new Set(['response']), control: new Set(['command']), engine: new Set(['cancel', 'dispose', 'event', 'request', 'response']) }),
 })
 
 function exactObject(value, allowed) {
@@ -30,7 +30,8 @@ function validateFrame(value, expectedDirection, generation, expectedSeq) {
       throw new Error(`LUMX typed pipe ${key} is invalid`)
     }
   }
-  if ((value.type === 'command' || value.type === 'request' || value.type === 'response') && value.requestId === undefined) {
+  if ((value.type === 'cancel' && value.channel === 'admission'
+    || value.type === 'command' || value.type === 'request' || value.type === 'response') && value.requestId === undefined) {
     throw new Error('LUMX typed pipe correlated frame lacks requestId')
   }
   if (value.channel === 'acp' && value.type === 'bytes'

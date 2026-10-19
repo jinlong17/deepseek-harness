@@ -193,6 +193,30 @@ export const PRODUCT_PATCHES = Object.freeze([
   }),
   Object.freeze({
     files: Object.freeze([
+      'lumx/desktop/byok-admission-peer.mjs',
+      'lumx/desktop/host-entry.mjs',
+      'lumx/desktop/host-process-bridge.mjs',
+      'lumx/desktop/host-supervisor.mjs',
+      'lumx/desktop/typed-pipe.mjs',
+      'lumx/runtime/byok-plugin.mjs',
+      'lumx/runtime/internal-launch.mjs',
+    ]),
+    id: 'G9-1-P12',
+    purpose: 'Fresh supervisor-owned identity admission for every non-relay desktop Host adapter call over the existing private typed pipe.',
+    removal: 'Remove the fixed admission peer and its Host/runtime wiring together; withdrawal restores the known alternate-adapter authorization bypass and is not release-safe.',
+    removalPaths: Object.freeze([
+      'lumx/desktop/byok-admission-peer.mjs', 'lumx/desktop/host-entry.mjs',
+      'lumx/desktop/host-process-bridge.mjs', 'lumx/desktop/host-supervisor.mjs',
+      'lumx/desktop/typed-pipe.mjs', 'lumx/runtime/byok-plugin.mjs',
+      'lumx/runtime/internal-launch.mjs', 'lumx/patches/registry.mjs',
+    ]),
+    tests: Object.freeze([
+      'node --test lumx/desktop/byok-admission-peer.test.mjs lumx/desktop/typed-pipe.test.mjs',
+      'node --test lumx/desktop/host-supervisor.test.mjs lumx/probes/live-host.unit.test.mjs',
+    ]),
+  }),
+  Object.freeze({
+    files: Object.freeze([
       'lumx/desktop/native/bootstrap.c',
       'lumx/desktop/native/build.mjs',
       'lumx/desktop/fd-observer.mjs',

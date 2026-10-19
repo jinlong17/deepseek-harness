@@ -38,20 +38,23 @@ async function fixture(root, name) {
     response.end(JSON.stringify({ text: `${name}-response` }))
   })
   const identity = { credential: `${name}-identity`, expiresAt: '2099-01-01T00:00:00.000Z', subject: name, type: 'lumx.local-auth.v1' }
+  let currentIdentity = identity; let admissions = 0
+  let validateGateway = async value => ({ active: true, expiresAt: currentIdentity?.expiresAt, subject: value.subject })
   const prepare = async (overrides = {}) => {
     const port = await freePort()
     return prepareLumxHostLaunch({
       auth: {
         byokKey: `${name}-provider-key`, endpoint: `http://127.0.0.1:${provider.address().port}/v1/chat/completions`,
-        gateway: { validate: async value => ({ active: true, expiresAt: identity.expiresAt, subject: value.subject }) },
-        getIdentity: () => identity,
+        gateway: { validate: async value => { admissions += 1; return validateGateway(value) } },
+        getIdentity: () => currentIdentity,
       },
       forkRoot: FORK, launchId: randomUUID(), mode: 'developer', nodePath: NODE, nodeSha256: NODE_SHA256,
       osHome, port, sourceRoot: SOURCE, workspaceDirectory, ...overrides,
     })
   }
-  return { close: () => new Promise(resolveClose => { provider.closeAllConnections?.(); provider.close(resolveClose) }),
-    launch: async (overrides = {}) => launchLumxHost(await prepare(overrides)), osHome, prepare, requests: () => requests, workspaceDirectory }
+  return { admissions: () => admissions, close: () => new Promise(resolveClose => { provider.closeAllConnections?.(); provider.close(resolveClose) }),
+    launch: async (overrides = {}) => launchLumxHost(await prepare(overrides)), osHome, prepare, requests: () => requests,
+    setIdentity(value) { currentIdentity = value }, setValidation(value) { validateGateway = value }, workspaceDirectory }
 }
 function assertProcessGone(pid) {
   for (const target of [pid, -pid]) assert.throws(() => process.kill(target, 0), error => error?.code === 'ESRCH')
@@ -198,6 +201,7 @@ test('two native Hosts isolate controls and persisted sessions survive a real pr
   assert.deepEqual(await restarted.shutdown(), exactStop())
   assertProcessGone(restarted.pid); assert.deepEqual(readdirSync(runtimeA), []); assert.deepEqual(readdirSync(runtimeB), [])
   assert.equal(a.requests(), 1); assert.equal(b.requests(), 1)
+  assert.equal(a.admissions(), 1); assert.equal(b.admissions(), 1)
   resources.complete()
 })
 
@@ -231,6 +235,87 @@ test('supported native Host selects the product platform-stub without opening a 
   assert.equal(value.requests(), 0)
   await host.shutdown()
   resources.complete()
+})
+
+test('supported split Host freshly admits alternate adapters without exposing identity', { timeout: 60_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'lumx-host-alternate-admission-'))
+  const resources = testResourceLedger(t, root)
+  const value = await resources.fixture(fixture(root, 'alternate-admission'))
+  const qualification = { version: 1, operations: ['byok-alternate'] }
+
+  const anonymous = await resources.host(value.launch({ qualification }))
+  value.setIdentity(undefined)
+  const denied = await anonymous.control.qualify({ operation: 'byok-alternate' })
+  assert.equal(denied.status, 'pass'); assert.equal(denied.facts.adapterCalls, 0)
+  assert.equal(denied.facts.failure.code, 'identity_required')
+  assert.equal(value.admissions(), 0); assert.equal(value.requests(), 0)
+  assert.deepEqual(await anonymous.shutdown(), exactStop())
+
+  value.setIdentity({ credential: 'accepted-identity', expiresAt: '2099-01-01T00:00:00.000Z', subject: 'alternate-admission', type: 'lumx.local-auth.v1' })
+  const accepted = await resources.host(value.launch({ qualification }))
+  const admitted = await accepted.control.qualify({ operation: 'byok-alternate' })
+  assert.equal(admitted.status, 'pass'); assert.equal(admitted.facts.adapterCalls, 1)
+  assert.equal(admitted.facts.chunks.at(-1)?.type, 'finish')
+  assert.equal(value.admissions(), 1); assert.equal(value.requests(), 0)
+  assert.deepEqual(await accepted.shutdown(), exactStop())
+  resources.complete()
+})
+
+test('split admission shutdown drains a held validation while another Host progresses', { timeout: 60_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'lumx-host-admission-drain-'))
+  const resources = testResourceLedger(t, root)
+  const value = await resources.fixture(fixture(root, 'admission-drain'))
+  const qualification = { version: 1, operations: ['byok-alternate'] }
+  const first = await resources.host(value.launch({ qualification })); const second = await resources.host(value.launch({ qualification }))
+  const entered = Promise.withResolvers(); const held = Promise.withResolvers(); let validations = 0
+  value.setValidation(async input => {
+    validations += 1
+    if (validations === 1) { entered.resolve(); await held.promise }
+    return { active: true, expiresAt: '2099-01-01T00:00:00.000Z', subject: input.subject }
+  })
+  const pending = first.control.qualify({ operation: 'byok-alternate' }); await entered.promise
+  const progressed = await second.control.qualify({ operation: 'byok-alternate' })
+  assert.equal(progressed.status, 'pass'); assert.equal(progressed.facts.adapterCalls, 1)
+  const stopped = await first.shutdown(); const cancelled = await pending
+  assert.deepEqual(stopped, exactStop()); assert.equal(cancelled.status, 'pass')
+  assert.equal(cancelled.facts.adapterCalls, 0); assert.equal(cancelled.facts.failure.code, 'admission_closed')
+  assert.equal(value.admissions(), 2); assert.equal(value.requests(), 0)
+  held.resolve(); await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(await second.shutdown(), exactStop())
+  resources.complete()
+})
+
+test('split admission carries relay expiry, revocation, and held identity replacement without provider effects', { timeout: 90_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'lumx-host-admission-relay-controls-'))
+  const resources = testResourceLedger(t, root)
+  const value = await resources.fixture(fixture(root, 'admission-relay-controls'))
+  const qualification = { version: 1, operations: ['byok-alternate'] }
+
+  value.setIdentity({ credential: 'expired', expiresAt: '2000-01-01T00:00:00.000Z', subject: 'expired', type: 'lumx.local-auth.v1' })
+  const expired = await resources.host(value.launch({ qualification }))
+  const expiredResult = await expired.control.qualify({ operation: 'byok-alternate' })
+  assert.equal(expiredResult.status, 'pass'); assert.equal(expiredResult.facts.adapterCalls, 0)
+  assert.equal(expiredResult.facts.failure.code, 'identity_expired'); assert.equal(value.admissions(), 0); assert.equal(value.requests(), 0)
+  await expired.shutdown()
+
+  value.setIdentity({ credential: 'revoked', expiresAt: '2099-01-01T00:00:00.000Z', subject: 'revoked', type: 'lumx.local-auth.v1' })
+  value.setValidation(async input => ({ active: false, expiresAt: '2099-01-01T00:00:00.000Z', subject: input.subject }))
+  const revoked = await resources.host(value.launch({ qualification }))
+  const revokedResult = await revoked.control.qualify({ operation: 'byok-alternate' })
+  assert.equal(revokedResult.status, 'pass'); assert.equal(revokedResult.facts.adapterCalls, 0)
+  assert.equal(revokedResult.facts.failure.code, 'identity_rejected'); assert.equal(value.admissions(), 1); assert.equal(value.requests(), 0)
+  await revoked.shutdown()
+
+  const entered = Promise.withResolvers(); const release = Promise.withResolvers()
+  value.setIdentity({ credential: 'before-hold', expiresAt: '2099-01-01T00:00:00.000Z', subject: 'held', type: 'lumx.local-auth.v1' })
+  value.setValidation(async input => { entered.resolve(); await release.promise; return { active: true, expiresAt: '2099-01-01T00:00:00.000Z', subject: input.subject } })
+  const held = await resources.host(value.launch({ qualification }))
+  const pending = held.control.qualify({ operation: 'byok-alternate' }); await entered.promise
+  value.setIdentity({ credential: 'after-hold', expiresAt: '2099-01-01T00:00:00.000Z', subject: 'held', type: 'lumx.local-auth.v1' })
+  release.resolve(); const replaced = await pending
+  assert.equal(replaced.status, 'pass'); assert.equal(replaced.facts.adapterCalls, 0)
+  assert.equal(replaced.facts.failure.code, 'identity_rejected'); assert.equal(value.admissions(), 2); assert.equal(value.requests(), 0)
+  await held.shutdown(); resources.complete()
 })
 
 test('test resource ledger settles parallel acquisition failures before draining acquired providers', async t => {
