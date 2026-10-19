@@ -19,12 +19,22 @@ async function freePort() {
   return port
 }
 
-async function input(root, sourceRoot) {
+async function input(root, sourceRoot, t) {
   const osHome = join(root, 'home'); const workspaceDirectory = join(root, 'workspace')
   mkdirSync(osHome); mkdirSync(workspaceDirectory)
+  let admissionCalls = 0
+  t.after(() => assert.equal(admissionCalls, 0, 'governance fixture must not request alternate-provider admission'))
   return {
     mode: 'developer', osHome, workspaceDirectory, sourceRoot, port: await freePort(),
-    auth: { byokKey: 'synthetic-relay-capability', endpoint: 'http://127.0.0.1:9/v1/chat/completions', relayOnly: true },
+    auth: {
+      byokKey: 'synthetic-relay-capability', endpoint: 'http://127.0.0.1:9/v1/chat/completions', relayOnly: true,
+      async admitOtherProvider() {
+        admissionCalls += 1
+        const error = new Error('governance fixture does not admit alternate providers')
+        error.code = 'identity_required'
+        throw error
+      },
+    },
     environment: {},
   }
 }
@@ -32,7 +42,7 @@ async function input(root, sourceRoot) {
 test('actual candidate composition denies late mutations and shuts down cleanly', { timeout: 30_000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'lumx-governance-actual-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
-  const runtime = await launchLumxRuntimeInProcess(await input(root, ROOT))
+  const runtime = await launchLumxRuntimeInProcess(await input(root, ROOT, t))
   t.after(runtime.shutdown)
   assert.equal(runtime.governance.rows.length, 7)
   assert(runtime.governance.rows.every(row => row.generation === 1 && row.format === 'module' && row.url.endsWith('/lib/index.js')))
@@ -84,7 +94,7 @@ test('actual candidate composition denies late mutations and shuts down cleanly'
 test('actual candidate rejects later resolver generation changes before unrelated admission or direct activation', { timeout: 30_000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'lumx-governance-generation-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
-  const runtime = await launchLumxRuntimeInProcess(await input(root, ROOT))
+  const runtime = await launchLumxRuntimeInProcess(await input(root, ROOT, t))
   t.after(runtime.shutdown)
   const internal = runtime.ctx.loader.internal
   runtime.ctx.loader.internal = new Proxy(internal, {
@@ -104,7 +114,7 @@ test('baseline launcher without required setup seam refuses readiness', { timeou
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const priorExitCode = process.exitCode
   try {
-    await assert.rejects(launchLumxRuntimeInProcess(await input(root, BASELINE)), /setup was not invoked/)
+    await assert.rejects(launchLumxRuntimeInProcess(await input(root, BASELINE, t)), /setup was not invoked/)
   } finally {
     process.exitCode = priorExitCode
   }
@@ -113,7 +123,7 @@ test('baseline launcher without required setup seam refuses readiness', { timeou
 test('actual forbidden package is cache-discovered by non-governed guards and governed preload refusal', { timeout: 30_000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'lumx-governance-package-cache-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
-  const runtime = await launchLumxRuntimeInProcess(await input(root, ROOT))
+  const runtime = await launchLumxRuntimeInProcess(await input(root, ROOT, t))
   t.after(runtime.shutdown)
   const target = runtime.governance.rows.find(row => row.id === 'product-analytics')
   assert(target)

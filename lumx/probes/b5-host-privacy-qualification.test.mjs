@@ -19,9 +19,19 @@ async function freePort() {
   return port
 }
 
-async function input(directory) {
+async function input(directory, t) {
+  let admissionCalls = 0
+  t.after(() => assert.equal(admissionCalls, 0, 'privacy fixture must not request alternate-provider admission'))
   return {
-    auth: { byokKey: 'synthetic-relay-capability', endpoint: 'http://127.0.0.1:9/v1/chat/completions', relayOnly: true },
+    auth: {
+      byokKey: 'synthetic-relay-capability', endpoint: 'http://127.0.0.1:9/v1/chat/completions', relayOnly: true,
+      async admitOtherProvider() {
+        admissionCalls += 1
+        const error = new Error('privacy fixture does not admit alternate providers')
+        error.code = 'identity_required'
+        throw error
+      },
+    },
     environment: {}, mode: 'consumer', osHome: join(directory, 'home'), port: await freePort(), sourceRoot: root, workspaceDirectory: join(directory, 'workspace'),
   }
 }
@@ -29,7 +39,7 @@ async function input(directory) {
 async function runtime(t) {
   const directory = await mkdtemp(join(tmpdir(), 'lumx-b5-protected-lifecycle-'))
   t.after(() => rm(directory, { force: true, recursive: true }))
-  const value = await launchLumxRuntimeInProcess(await input(directory))
+  const value = await launchLumxRuntimeInProcess(await input(directory, t))
   t.after(value.shutdown)
   return value
 }
