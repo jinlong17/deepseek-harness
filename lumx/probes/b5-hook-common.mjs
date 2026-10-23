@@ -26,16 +26,53 @@ export function loadConfig() {
 export function writeResult(config, value) {
   writeFileSync(resolve(config.resultPath), `${JSON.stringify({ schema: 'g9-b5-runtime-result/v1', scenarioConfigSha256: config.configSha256, ...value }, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
 }
+/** Start a loopback fixture; close drains admitted handlers and rejects on their first unexpected failure. */
 export async function listen(handler) {
-  const server = createServer((request, response) => Promise.resolve(handler(request, response)).catch(error => {
-    response.writeHead(500, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: error.message }))
-  }))
+  const active = new Set(); const responseFailures = []
+  let firstFailure; let handlerFailed = false; let closing = false; let closed
+  const server = createServer((request, response) => {
+    if (closing) { response.destroy(); return }
+    // Register before invoking the handler, including its synchronous portion.
+    let task
+    task = Promise.resolve().then(() => {
+      if (closing) { response.destroy(); return }
+      return handler(request, response)
+    }).catch(error => {
+      if (!handlerFailed) { firstFailure = error; handlerFailed = true }
+      try {
+        if (!response.headersSent && !response.writableEnded && !response.destroyed) {
+          response.writeHead(500, { 'content-type': 'application/json' })
+          response.end(JSON.stringify({ error: String(error?.message ?? error).slice(0, 256) }))
+        } else if (!response.destroyed) response.destroy()
+      } catch (responseError) {
+        responseFailures.push(responseError)
+        try { response.destroy() } catch (destroyError) { responseFailures.push(destroyError) }
+      }
+    }).then(() => { active.delete(task) })
+    active.add(task)
+  })
   await new Promise((ok, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', ok) })
   const address = server.address(); if (address === null || typeof address === 'string') throw new Error('loopback server address')
-  let closed
-  return Object.freeze({ port: address.port, server, close: () => (closed ??= new Promise((ok, fail) => {
-    server.closeAllConnections?.(); server.close(error => error ? fail(error) : ok())
-  })) })
+  return Object.freeze({ port: address.port, server, failure: () => firstFailure, close: () => {
+    if (closed !== undefined) return closed
+    closing = true
+    closed = (async () => {
+      const failures = []
+      const serverClosed = new Promise(resolveClose => {
+        try { server.close(error => resolveClose(error)) } catch (error) { resolveClose(error) }
+        try { server.closeAllConnections?.() } catch (error) { failures.push(error) }
+      })
+      try {
+        const settled = await timeout(Promise.all([serverClosed, Promise.allSettled([...active])]), 'listener close/drain')
+        if (settled[0] !== undefined) failures.push(settled[0])
+      } catch (error) { failures.push(error) }
+      if (handlerFailed) failures.unshift(firstFailure)
+      failures.push(...responseFailures)
+      if (failures.length === 1) throw failures[0]
+      if (failures.length) throw new AggregateError(failures, 'listener handler and cleanup failed')
+    })()
+    return closed
+  } })
 }
 export async function freePort() {
   const holder = await listen((_request, response) => { response.writeHead(503); response.end() })

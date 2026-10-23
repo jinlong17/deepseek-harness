@@ -189,6 +189,7 @@ export const PRODUCT_PATCHES = Object.freeze([
       'node --test lumx/desktop/typed-pipe.test.mjs',
       'node --test lumx/probes/b5-external-qwen-support.test.mjs',
       'node --test lumx/probes/b5-owner-protocol.test.mjs', 'node --test lumx/probes/b5-factory-cleanup.test.mjs lumx/probes/b5-host-privacy-qualification.test.mjs',
+      'node --test lumx/probes/b5-hook-common.test.mjs',
       'node lumx/probes/gate1-prepared-host-controller.mjs <caller-anchored qualification arguments>',
       'node scripts/b5-client-build-environment-helper.ts <caller-anchored environment fixture>',
     ]),
