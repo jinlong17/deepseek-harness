@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -10,6 +10,135 @@ import JsonlSessionPersistence from '../../packages/session/session-persistence-
 import { authenticate, follow, timeout } from './b5-hook-common.mjs'
 
 const sha = value => createHash('sha256').update(value).digest('hex')
+const ROOT_SELECTOR = '[data-slot="root"]'
+const ERROR_SELECTOR = '[data-slot-error="root"]'
+const UI_RECORD_LIMIT = 8192
+function boundedDigest(value, limit) {
+  if (typeof value !== 'string') return { sha256: null, truncated: false }
+  const prefix = Buffer.from(value.slice(0, limit + 1)).subarray(0, limit)
+  return { sha256: sha(prefix), truncated: Buffer.byteLength(value) > limit }
+}
+function diagnosticFd() {
+  let selected
+  for (let index = 2; index < process.argv.length; index += 1) {
+    if (process.argv[index] === '--diagnostic-fd') selected = process.argv[index + 1]
+  }
+  if (selected === undefined) return 2
+  if (selected !== '22') throw new Error('adversarial diagnostic FD is invalid')
+  return 22
+}
+function ownString(value, key) {
+  if (value === null || typeof value !== 'object') return undefined
+  const entry = Object.getOwnPropertyDescriptor(value, key)
+  return entry && Object.hasOwn(entry, 'value') && typeof entry.value === 'string' ? entry.value : undefined
+}
+function safeError(error) {
+  const name = ownString(error, 'name')
+  const safeName = ['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'TimeoutError'].includes(name) ? name : 'OtherError'
+  const message = ownString(error, 'message')
+  const classification = safeName === 'SyntaxError' ? 'syntax' : safeName === 'ReferenceError' ? 'reference'
+    : safeName === 'TypeError' ? 'type' : message && /module|import/iu.test(message.slice(0, 4096)) ? 'module-load' : 'other'
+  const digest = boundedDigest(message, 4096)
+  return { name: safeName, classification, message_sha256: digest.sha256, message_truncated: digest.truncated }
+}
+function safePath(url, origin) {
+  try {
+    const parsed = new URL(url)
+    if (parsed.origin !== origin) return { category: 'cross-origin' }
+    const pathname = parsed.pathname
+    if (pathname === '/') return { category: 'static', pathname: '/' }
+    if (/^\/assets\/[A-Za-z0-9._-]{1,230}\.(?:js|css)$/u.test(pathname)) return { category: 'static', extension: pathname.endsWith('.js') ? 'js' : 'css', pathname_sha256: sha(pathname) }
+    const digest = boundedDigest(pathname, 256)
+    return { category: 'redacted', pathname_sha256: digest.sha256, path_truncated: digest.truncated }
+  } catch { return { category: 'unavailable' } }
+}
+function safeResource(value) { return ['document', 'script', 'stylesheet'].includes(value) ? value : 'other' }
+function failureClass(value) {
+  if (typeof value !== 'string') return 'unknown'
+  if (/abort/iu.test(value)) return 'aborted'
+  if (/cert|ssl|tls/iu.test(value)) return 'tls'
+  if (/connection|refused|reset|timed.?out/iu.test(value)) return 'connection'
+  if (/block/iu.test(value)) return 'blocked'
+  return 'other'
+}
+function browserObserver(page, readyUrl) {
+  const origin = new URL(readyUrl).origin
+  const state = { navigation: [], assets: [], page_errors: [], request_failures: [], dropped: { navigation: 0, assets: 0, page_errors: 0, request_failures: 0, cross_origin: 0 }, observation_failed: false }
+  const append = (array, limit, value, counter) => { if (array.length < limit) array.push(value); else state.dropped[counter] = Math.min(state.dropped[counter] + 1, 65535) }
+  const response = value => {
+    try {
+      const request = value.request(); const resource = safeResource(request.resourceType()); const path = safePath(value.url(), origin)
+      if (path.category === 'cross-origin') { state.dropped.cross_origin = Math.min(state.dropped.cross_origin + 1, 65535); return }
+      if (resource === 'document') append(state.navigation, 4, { ...path, status: Number.isInteger(value.status()) ? value.status() : null }, 'navigation')
+      if (path.category === 'static' && ['script', 'stylesheet'].includes(resource)) append(state.assets, 16, { ...path, resource, status: Number.isInteger(value.status()) ? value.status() : null }, 'assets')
+    } catch { state.observation_failed = true }
+  }
+  const pageerror = value => { try { append(state.page_errors, 8, safeError(value), 'page_errors') } catch { state.observation_failed = true } }
+  const requestfailed = value => {
+    try {
+      const resource = safeResource(value.resourceType()); const path = safePath(value.url(), origin)
+      if (path.category !== 'static' || !['document', 'script', 'stylesheet'].includes(resource)) return
+      const failure = value.failure(); const detail = ownString(failure, 'errorText')
+      const digest = boundedDigest(detail, 4096)
+      append(state.request_failures, 16, { ...path, resource, failure: failureClass(detail?.slice(0, 4096)), detail_sha256: digest.sha256, detail_truncated: digest.truncated }, 'request_failures')
+    } catch { state.observation_failed = true }
+  }
+  const listeners = [['response', response], ['pageerror', pageerror], ['requestfailed', requestfailed]]
+  try { for (const [event, handler] of listeners) page.on(event, handler) }
+  catch (error) { for (const [event, handler] of listeners) { try { page.off(event, handler) } catch {} } throw error }
+  return { state, detach: () => { page.off('response', response); page.off('pageerror', pageerror); page.off('requestfailed', requestfailed) } }
+}
+async function uiSnapshot(page, readyUrl) {
+  const snapshot = { ready_state: 'unknown', path: { category: 'unavailable' }, root_attached_count: null,
+    roots_truncated: false, root_visible: null, root_error_marker: null }
+  const origin = new URL(readyUrl).origin
+  let timer
+  const work = (async () => {
+    const dom = await page.evaluate(({ root, error }) => ({ readyState: document.readyState, pathname: location.href,
+      roots: document.querySelectorAll(root).length, rootError: document.querySelector(error) !== null }), { root: ROOT_SELECTOR, error: ERROR_SELECTOR })
+    snapshot.ready_state = ['loading', 'interactive', 'complete'].includes(dom?.readyState) ? dom.readyState : 'unknown'
+    snapshot.path = safePath(dom?.pathname, origin)
+    if (Number.isSafeInteger(dom?.roots) && dom.roots >= 0) {
+      snapshot.root_attached_count = Math.min(dom.roots, 16); snapshot.roots_truncated = dom.roots > 16
+      if (dom.roots > 0) {
+        const roots = page.locator(ROOT_SELECTOR); let visible = false
+        for (let index = 0; index < Math.min(dom.roots, 16); index += 1) visible ||= await roots.nth(index).isVisible()
+        snapshot.root_visible = visible
+      } else snapshot.root_visible = false
+    }
+    if (typeof dom?.rootError === 'boolean') snapshot.root_error_marker = dom.rootError
+    return snapshot
+  })()
+  try { return await Promise.race([work, new Promise(resolve => { timer = setTimeout(() => resolve({ ...snapshot, observation_timeout: true }), 1000) })]) }
+  finally { clearTimeout(timer); void work.catch(() => {}) }
+}
+export async function waitForB5UiRoot(page, readyUrl, phase, writer = (fd, line) => writeSync(fd, line)) {
+  const observer = browserObserver(page, readyUrl)
+  let navigation
+  try {
+    navigation = await page.goto(readyUrl, { waitUntil: 'load', timeout: 30_000 })
+    await page.locator(ROOT_SELECTOR).waitFor({ timeout: 20_000 })
+  } catch (primary) {
+    let snapshot
+    try { snapshot = await uiSnapshot(page, readyUrl) } catch { snapshot = { unavailable: true } }
+    try {
+      const record = { schema: 'g9-b5-ui-failure/v1', phase, navigation_status: navigation && Number.isInteger(navigation.status()) ? navigation.status() : null,
+        ...observer.state, snapshot }
+      let line = `B5_UI_FAILURE ${JSON.stringify(record)}\n`
+      if (Buffer.byteLength(line) > UI_RECORD_LIMIT) line = `B5_UI_FAILURE ${JSON.stringify({ schema: 'g9-b5-ui-failure/v1', phase, truncated: true,
+        navigation_status: record.navigation_status, observation_failed: observer.state.observation_failed,
+        retained_counts: { navigation: observer.state.navigation.length, assets: observer.state.assets.length,
+          page_errors: observer.state.page_errors.length, request_failures: observer.state.request_failures.length },
+        dropped: observer.state.dropped, snapshot })}\n`
+      writer(diagnosticFd(), line)
+    } catch { /* diagnostics never replace the original browser error */ }
+    throw primary
+  } finally { observer.detach() }
+}
+export async function closeBrowserContext(context, failed, primary) {
+  try { await context.close() }
+  catch (cleanup) { if (failed) throw new AggregateError([primary, cleanup], 'UI scenario plus browser cleanup failed'); throw cleanup }
+}
 export function front(host, approval) {
   const updates = []; const permissions = []
   const connection = new ClientSideConnection(() => ({
@@ -60,10 +189,11 @@ export async function browserCreateCancel(config, host, barriers, durable) {
   const engine = await chromium(config.sourceRoot); if (engine === undefined) throw new Error('pinned Chromium API unavailable')
   const context = await engine.launchPersistentContext(config.browserUserData, { executablePath: config.browserPath, headless: true,
     env: { ...process.env, MAC_CHROMIUM_TMPDIR: config.browserTemporary, TMPDIR: config.browserTemporary }, args: ['--no-sandbox','--disable-background-networking','--disable-component-update','--disable-sync','--no-first-run','--password-store=basic','--use-mock-keychain'] })
+  let failed = false; let primary
   try {
     const page = context.pages()[0] ?? await context.newPage(); const pageErrors = []; const apiRequests = []
-    page.on('pageerror', error => pageErrors.push(String(error))); page.on('request', request => { const url = new URL(request.url()); if (url.pathname.startsWith('/api/')) apiRequests.push(url.pathname) })
-    await page.goto(host.readyUrl, { waitUntil: 'load', timeout: 30_000 }); await page.locator('[data-slot="root"]').waitFor({ timeout: 20_000 })
+    page.on('pageerror', error => pageErrors.push(safeError(error))); page.on('request', request => { const url = new URL(request.url()); if (url.pathname.startsWith('/api/')) apiRequests.push(url.pathname) })
+    await waitForB5UiRoot(page, host.readyUrl, 'create')
     const cont = page.getByRole('button', { name: 'Continue', exact: true }); if (await cont.isVisible().catch(() => false)) await cont.click()
     await workspace(page, config.workspaceDirectory)
     const durableInitial = await openById(page, durable.sessionId, 'FIRST_FINAL')
@@ -73,18 +203,21 @@ export async function browserCreateCancel(config, host, barriers, durable) {
     await stop.waitFor({ state: 'detached', timeout: 15_000 }); const selected = page.getByRole('tree', { name: 'Sessions', exact: true }).locator('[role="treeitem"][aria-selected="true"][data-row-key^="session:"]').first()
     const sessionId = (await selected.getAttribute('data-row-key'))?.slice('session:'.length)
     return { apiRequests, pageErrors, durableInitial, sessionId, created: typeof sessionId === 'string', cancelled: apiRequests.includes('/api/session/cancel') }
-  } finally { await context.close() }
+  } catch (error) { failed = true; primary = error; throw error }
+  finally { await closeBrowserContext(context, failed, primary) }
 }
 export async function browserResume(config, host, continuity) {
   const engine = await chromium(config.sourceRoot); const context = await engine.launchPersistentContext(config.browserUserData, { executablePath: config.browserPath, headless: true,
     env: { ...process.env, MAC_CHROMIUM_TMPDIR: config.browserTemporary, TMPDIR: config.browserTemporary }, args: ['--no-sandbox','--disable-background-networking','--disable-component-update','--disable-sync','--no-first-run','--password-store=basic','--use-mock-keychain'] })
+  let failed = false; let primary
   try {
-    const page = context.pages()[0] ?? await context.newPage(); const errors = []; page.on('pageerror', error => errors.push(String(error)))
-    await page.goto(host.readyUrl, { waitUntil: 'load', timeout: 30_000 }); await page.locator('[data-slot="root"]').waitFor({ timeout: 20_000 })
+    const page = context.pages()[0] ?? await context.newPage(); const errors = []; page.on('pageerror', error => errors.push(safeError(error)))
+    await waitForB5UiRoot(page, host.readyUrl, 'resume')
     const cont = page.getByRole('button', { name: 'Continue', exact: true }); if (await cont.isVisible().catch(() => false)) await cont.click()
     await workspace(page, config.workspaceDirectory)
     return { durable: await openById(page, continuity.sessionId, 'B5_OK_1'), control: await openById(page, continuity.controlSessionId, 'Stopped'), errors }
-  } finally { await context.close() }
+  } catch (error) { failed = true; primary = error; throw error }
+  finally { await closeBrowserContext(context, failed, primary) }
 }
 export async function runCreate(config, host, stub, barriers) {
   const auth = await authenticate(host.readyUrl); const client = front(host, async params => { const option = params.options.find(value => value.kind === 'allow_once'); return option ? { outcome: { outcome: 'selected', optionId: option.optionId } } : { outcome: { outcome: 'cancelled' } } })
