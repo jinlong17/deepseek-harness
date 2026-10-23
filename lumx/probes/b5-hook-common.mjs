@@ -1,11 +1,48 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { lstatSync, readFileSync, realpathSync, writeFileSync, writeSync } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
 import { resolve } from 'node:path'
 import WebSocket from '../../apps/cli/node_modules/ws/index.js'
 
 const MAX_BODY = 1024 * 1024
 const hash = value => createHash('sha256').update(value).digest('hex')
+function diagnosticFd() {
+  let selected
+  for (let index = 2; index < process.argv.length; index += 1) {
+    if (process.argv[index] === '--diagnostic-fd') selected = process.argv[index + 1]
+  }
+  if (selected === undefined) return 2
+  if (selected !== '22') throw new Error('adversarial diagnostic FD is invalid')
+  return 22
+}
+function diagnosticPart(value) {
+  if (typeof value !== 'string') return '[non-string]'
+  return value.replace(/[^\x20-\x7e]/gu, '?')
+    .replace(/https?:\/\/\S+/giu, '[url]')
+    .replace(/\b(bearer|token|secret|password|api[-_ ]?key|authorization|cookie)\s*[:= ]\s*\S+/giu, '$1=[redacted]')
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/gu, '[redacted-key]')
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/gu, '[redacted-value]')
+    .slice(0, 256)
+}
+function handlerDiagnostic(error) {
+  const seen = new Set(); const parts = []
+  let current = error
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (!(current instanceof Error)) { parts.push('[non-Error thrown or cause]'); break }
+    if (seen.has(current)) { parts.push('[cause cycle]'); break }
+    seen.add(current)
+    let name; let message; let cause
+    try { name = current.name; message = current.message; cause = current.cause } catch { parts.push('[error fields unavailable]'); break }
+    parts.push(`${diagnosticPart(name)}: ${diagnosticPart(message)}`)
+    if (cause === undefined) break
+    current = cause
+  }
+  return `B5 fixture handler failure: ${parts.join('; cause: ')}\n`.slice(0, 4096)
+}
+function errorReply(error) {
+  try { if (error instanceof Error) return diagnosticPart(error.message) } catch { /* retain bounded generic reply */ }
+  return 'fixture handler failed'
+}
 export const deferred = () => Promise.withResolvers()
 export const timeout = (promise, label, ms = 30_000) => {
   let timer
@@ -38,11 +75,14 @@ export async function listen(handler) {
       if (closing) { response.destroy(); return }
       return handler(request, response)
     }).catch(error => {
-      if (!handlerFailed) { firstFailure = error; handlerFailed = true }
+      if (!handlerFailed) {
+        firstFailure = error; handlerFailed = true
+        try { writeSync(diagnosticFd(), handlerDiagnostic(error)) } catch (diagnosticError) { responseFailures.push(diagnosticError) }
+      }
       try {
         if (!response.headersSent && !response.writableEnded && !response.destroyed) {
           response.writeHead(500, { 'content-type': 'application/json' })
-          response.end(JSON.stringify({ error: String(error?.message ?? error).slice(0, 256) }))
+          response.end(JSON.stringify({ error: errorReply(error) }))
         } else if (!response.destroyed) response.destroy()
       } catch (responseError) {
         responseFailures.push(responseError)
