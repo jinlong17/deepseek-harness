@@ -158,6 +158,7 @@ export const PRODUCT_PATCHES = Object.freeze([
       'lumx/probes/b5-desktop-host-factory.mjs',
       'lumx/probes/b5-external-qwen-factory.mjs',
       'lumx/probes/b5-external-qwen-support.mjs',
+      'lumx/probes/b5-external-qwen-support.test.mjs',
       'lumx/probes/b5-fixed-stubs.mjs',
       'lumx/probes/b5-h1-host-factory.mjs',
       'lumx/probes/b5-hook-common.mjs',
@@ -186,6 +187,7 @@ export const PRODUCT_PATCHES = Object.freeze([
     ]),
     tests: Object.freeze([
       'node --test lumx/desktop/typed-pipe.test.mjs',
+      'node --test lumx/probes/b5-external-qwen-support.test.mjs',
       'node --test lumx/probes/b5-owner-protocol.test.mjs', 'node --test lumx/probes/b5-factory-cleanup.test.mjs lumx/probes/b5-host-privacy-qualification.test.mjs',
       'node lumx/probes/gate1-prepared-host-controller.mjs <caller-anchored qualification arguments>',
       'node scripts/b5-client-build-environment-helper.ts <caller-anchored environment fixture>',

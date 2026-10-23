@@ -22,7 +22,9 @@ export function front(host, approval) {
 }
 export async function initialize(client) {
   const value = await client.connection.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
-  if (value.protocolVersion !== PROTOCOL_VERSION || value.agentCapabilities?.loadSession !== true) throw new Error('official ACP capability mismatch')
+  const sessions = value.agentCapabilities?.sessionCapabilities
+  const supports = name => Object.hasOwn(sessions ?? {}, name) && sessions[name] !== null && typeof sessions[name] === 'object' && !Array.isArray(sessions[name])
+  if (value.protocolVersion !== PROTOCOL_VERSION || !['resume', 'list', 'close'].every(supports)) throw new Error('official Host ACP session capabilities mismatch')
   return value
 }
 export async function readEvents(root, sessionId) {
