@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -10,7 +10,7 @@ import { test } from 'node:test'
 
 import { PROTOCOL_VERSION } from '../../apps/cli/node_modules/@agentclientprotocol/sdk/dist/acp.js'
 import { createB5RequestObserver, qwenStub } from './b5-fixed-stubs.mjs'
-import { closeBrowserContext, initialize, waitForB5UiRoot } from './b5-external-qwen-support.mjs'
+import { browserCreateCancel, closeBrowserContext, initialize, openById, waitForB5UiRoot } from './b5-external-qwen-support.mjs'
 
 const host = () => ({
   protocolVersion: PROTOCOL_VERSION,
@@ -53,6 +53,13 @@ test('request observer records bounded source signatures without changing tool a
   const row = parseObservation(lines[0])
   assert.equal(row.shell_present, true)
   assert.equal(row.tools_count, 1)
+  assert.equal(row.stream_state, 'absent')
+  assert.equal(row.final_user_content_shape, 'string')
+  assert.equal(row.final_role, 'user')
+  assert.equal(row.current_text_state, 'string')
+  assert.deepEqual(row.current_final_user_markers, ['B5 TOOL'])
+  assert.deepEqual(row.history_markers, [])
+  assert.deepEqual(row.source_pattern_matches, [])
   assert.deepEqual(row.signatures, ['unknown'])
   assert.equal(row.canonical_parsed_payload_sha256, digest(JSON.stringify({ messages: [{ content: 'B5 TOOL', role: 'user' }], model: 'qwen3.7-max', tools: [{ function: { name: 'run_shell_command' }, type: 'function' }] })))
   for (const [signature, content] of [
@@ -71,6 +78,35 @@ test('request observer records bounded source signatures without changing tool a
   assert.equal(lines.length, 6)
   const newSession = []; createB5RequestObserver((_fd, line) => newSession.push(line))({ messages: [{ role: 'user', content: 'B5 TOOL' }], tools: [] }, 1)
   assert.equal(parseObservation(newSession[0]).ordinal, 1)
+  for (const [stream, expected] of [[true, 'true'], [false, 'false'], [null, 'other'], ['true', 'other']]) {
+    observe({ messages: [{ role: 'user', content: 'B5 TOOL' }], stream }, 8)
+    assert.equal(parseObservation(lines.at(-1)).stream_state, expected)
+  }
+  observe({ messages: [{ role: 'user', content: 'B5 TOOL' }, { role: 'user', content: 'unrecognized' }], tools: null }, 9)
+  assert.deepEqual(parseObservation(lines.at(-1)).current_final_user_markers, [])
+  assert.deepEqual(parseObservation(lines.at(-1)).history_markers, ['B5 TOOL'])
+  assert.equal(parseObservation(lines.at(-1)).tools_state, 'null')
+  observe({ messages: [{ role: 'user', content: 'B5 TOOL B5 REJECT' }] }, 10)
+  assert.deepEqual(parseObservation(lines.at(-1)).current_final_user_markers, ['B5 TOOL', 'B5 REJECT'])
+  observe({ messages: [{ role: 'user', content: [{ type: 'text', text: 'B5 TOOL' }] }] }, 11)
+  assert.equal(parseObservation(lines.at(-1)).final_user_content_shape, 'array')
+  assert.equal(parseObservation(lines.at(-1)).current_text_state, 'text-parts')
+  assert.deepEqual(parseObservation(lines.at(-1)).current_final_user_markers, ['B5 TOOL'])
+  observe({ messages: [{ role: 'user', content: [{ type: 'text', text: 'B5 TOOL' }] }, { role: 'user', content: [{ type: 'text', text: 'auxiliary' }] }] }, 12)
+  assert.equal(parseObservation(lines.at(-1)).final_role, 'user')
+  assert.deepEqual(parseObservation(lines.at(-1)).current_final_user_markers, [])
+  assert.deepEqual(parseObservation(lines.at(-1)).history_markers, ['B5 TOOL'])
+  for (const content of [[{ type: 'image', image_url: 'synthetic' }], [{ type: 'text', text: 'B5 TOOL' }, { type: 'image' }], [{ type: 'text' }]]) {
+    observe({ messages: [{ role: 'user', content: 'B5 TOOL' }, { role: 'user', content }] }, 13)
+    const mixed = parseObservation(lines.at(-1))
+    assert.equal(mixed.current_text_state, 'mixed-or-malformed-parts')
+    assert.equal(mixed.current_final_user_markers, null)
+    assert.equal(mixed.source_pattern_matches, null)
+    assert.deepEqual(mixed.history_markers, ['B5 TOOL'])
+  }
+  observe({ messages: [{ role: 'user', content: 'B5 TOOL' }, { role: 'tool', content: 'synthetic' }] }, 14)
+  assert.equal(parseObservation(lines.at(-1)).final_role, 'tool')
+  assert.equal(parseObservation(lines.at(-1)).current_final_user_markers, null)
 })
 
 test('request observer fails closed on getters, sink errors and record flood', () => {
@@ -82,9 +118,19 @@ test('request observer fails closed on getters, sink errors and record flood', (
   assert.equal(reads, 0)
   assert.equal(lines.length, 0)
   assert.throws(() => createB5RequestObserver(() => { throw new Error('sink unavailable') })({ messages: [{ role: 'user', content: 'B5 TOOL' }] }, 1), /sink unavailable/)
-  for (let index = 0; index < 128; index += 1) observe({ messages: [{ role: 'user', content: 'B5 TOOL' }] }, index)
-  assert.equal(lines.length, 128)
-  assert.throws(() => observe({ messages: [{ role: 'user', content: 'B5 TOOL' }] }, 129), /record bound/)
+  let bound
+  for (let index = 0; index < 129; index += 1) {
+    try { observe({ messages: [{ role: 'user', content: 'B5 TOOL' }] }, index) } catch (error) { bound = error; break }
+  }
+  assert.equal(bound?.message, 'request observer output bound')
+  assert.equal(lines.length, 119)
+  const totalBytes = lines.reduce((bytes, line) => bytes + Buffer.byteLength(line), 0)
+  assert.equal(totalBytes, 65340)
+  assert.ok(totalBytes <= 64 * 1024)
+  const next = []
+  createB5RequestObserver((_fd, line) => next.push(line))({ messages: [{ role: 'user', content: 'B5 TOOL' }] }, lines.length)
+  assert.equal(Buffer.byteLength(next[0]), 550)
+  assert.ok(totalBytes + Buffer.byteLength(next[0]) > 64 * 1024)
   assert.ok(lines.every(line => Buffer.byteLength(line) <= 2048))
 })
 
@@ -107,6 +153,9 @@ test('real fixture handler still requires shell on first TOOL and keeps normal S
   const prompt = [{ role: 'user', content: 'B5 TOOL' }]
   await assert.rejects(invoke(handler, { model: 'qwen3.7-max', messages: prompt }), /Qwen omitted run_shell_command/)
   await assert.rejects(invoke(handler, { model: 'qwen3.7-max', messages: prompt, tools: [{ function: { name: 'other_tool' } }] }), /Qwen omitted run_shell_command/)
+  for (const tools of [null, false, [], 'run_shell_command']) {
+    await assert.rejects(invoke(handler, { model: 'qwen3.7-max', messages: prompt, tools }))
+  }
   const normal = await invoke(handler, { model: 'qwen3.7-max', messages: prompt, tools: [{ function: { name: 'run_shell_command' } }] })
   assert.equal(normal.headers['content-type'], 'text/event-stream')
   assert.match(normal.chunks.join(''), /run_shell_command/)
@@ -115,6 +164,9 @@ test('real fixture handler still requires shell on first TOOL and keeps normal S
   await assert.rejects(invoke(handler, { model: 'qwen3.7-max', messages: [{ role: 'user', content: 'B5 TOOL Conversation so far:' }] }), /Qwen omitted run_shell_command/)
   await assert.rejects(invoke(handler, { model: 'qwen3.7-max', messages: [{ role: 'user', content: 'B5 REJECT' }] }), /Qwen omitted run_shell_command/)
   await assert.rejects(invoke(handler, { model: 'qwen3.7-max', messages: [{ role: 'user', content: 'B5 LATE' }] }), /Qwen omitted run_shell_command/)
+  for (const marker of ['B5 REJECT', 'B5 LATE']) {
+    await assert.rejects(invoke(handler, { model: 'qwen3.7-max', messages: [{ role: 'user', content: marker }], tools: [] }), /Qwen omitted run_shell_command/)
+  }
   assert.equal(stub.effects().world, null)
   await stub.close()
 })
@@ -132,7 +184,7 @@ test('request observer honors selected fd22 while fd2 is poisoned', () => {
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
-function fakePage({ failure, roots = 0, visible = false, evaluateError, navigation = { status: () => 200 } } = {}) {
+function fakePage({ failure, roots = 0, visible = false, slots = 0, mount = true, mountChildren = 0, evaluateError, navigation = { status: () => 200 } } = {}) {
   const page = new EventEmitter(); page.calls = []
   page.goto = async (url, options) => { page.calls.push(['goto', url, options]); if (failure === 'goto') throw page.primary; return navigation }
   page.locator = selector => { page.calls.push(['locator', selector]); return {
@@ -140,21 +192,108 @@ function fakePage({ failure, roots = 0, visible = false, evaluateError, navigati
     nth: index => ({ isVisible: async () => { page.calls.push(['isVisible', index]); return visible } }),
   } }
   page.evaluate = async (_fn, selectors) => { page.calls.push(['evaluate', selectors]); if (evaluateError) throw evaluateError
-    return { readyState: 'complete', pathname: 'http://user:secret@127.0.0.1:1234/?token=secret', roots, rootError: false } }
+    return { readyState: 'complete', pathname: 'http://user:secret@127.0.0.1:1234/?token=secret', roots, rootError: false, slots, mount, mountChildren } }
   page.primary = new Error('ORIGINAL_TIMEOUT_PRIVATE')
   return page
 }
 const uiRecord = line => JSON.parse(line.slice('B5_UI_FAILURE '.length))
-test('UI success preserves original goto/load and root-visible wait without diagnostic', async () => {
+test('UI success preserves goto/load and waits only for attached structural root', async () => {
   const page = fakePage(); const lines = []
   await waitForB5UiRoot(page, 'http://127.0.0.1:1234/', 'create', (_fd, line) => lines.push(line))
   assert.deepEqual(page.calls, [['goto', 'http://127.0.0.1:1234/', { waitUntil: 'load', timeout: 30_000 }],
-    ['locator', '[data-slot="root"]'], ['waitFor', { timeout: 20_000 }]])
+    ['locator', '[data-slot="root"]'], ['waitFor', { state: 'attached', timeout: 20_000 }]])
   assert.equal(lines.length, 0)
   assert.equal(page.listenerCount('response') + page.listenerCount('pageerror') + page.listenerCount('requestfailed'), 0)
 })
+function sessionPage({ tree = true, group = true, row = true, response = true, selected = true } = {}) {
+  const calls = []
+  const visible = (kind, available) => ({
+    waitFor: async options => { calls.push([kind, 'waitFor', options]); if (!available) throw new Error(`${kind} not visible`) },
+    click: async () => { calls.push([kind, 'click']) },
+    getAttribute: async name => { calls.push([kind, 'getAttribute', name]); return name === 'aria-selected' ? String(selected) : 'true' },
+    filter: () => visible(kind, available), first: () => visible(kind, available),
+    locator: selector => selector.includes('data-row-key') ? visible('row', row) : visible('group', group),
+  })
+  const scopedTree = { ...visible('tree', tree), locator: selector => selector.includes('data-row-key') ? visible('row', row) : visible('group', group) }
+  const root = { getByRole: () => scopedTree, getByText: () => visible('response', response) }
+  return { calls, locator: selector => { calls.push(['page', 'locator', selector]); return root },
+    getByRole: () => { throw new Error('unscoped tree lookup') }, getByText: () => { throw new Error('unscoped response lookup') } }
+}
+test('attached root requires visible scoped Sessions tree, group, row, response and selection', async () => {
+  const good = sessionPage()
+  assert.deepEqual(await openById(good, 'synthetic', 'B5_OK_1'), { rendered: true, selected: true })
+  assert.deepEqual(good.calls[0], ['page', 'locator', '[data-slot="root"]'])
+  assert.ok(good.calls.some(call => call[0] === 'row' && call[1] === 'click'))
+  for (const key of ['tree', 'group', 'row', 'response']) {
+    await assert.rejects(openById(sessionPage({ [key]: false }), 'synthetic', 'B5_OK_1'), /not visible/)
+  }
+  await assert.rejects(openById(sessionPage({ selected: false }), 'synthetic', 'B5_OK_1'), /to be selected/)
+})
+function createPathPage({ unusable = null, delayedNewSession = false } = {}) {
+  const page = new EventEmitter(); const actions = []
+  let newSessionReady = !delayedNewSession
+  const control = name => ({
+    waitFor: async options => { actions.push([name, 'waitFor', options]); if (unusable === `${name}-hidden`) throw new Error(`${name} hidden`) },
+    isVisible: async () => name !== 'new-session' || newSessionReady,
+    isEnabled: async () => (name !== 'new-session' || newSessionReady) && unusable !== `${name}-disabled`,
+    click: async () => {
+      actions.push([name, 'click'])
+      if (delayedNewSession && name === 'new-session') {
+        await new Promise(resolve => setTimeout(resolve, 5))
+        newSessionReady = true
+      }
+      if (unusable === `${name}-hidden` || unusable === `${name}-disabled`) throw new Error(`${name} unavailable`)
+      if (name === 'stop') page.emit('request', { url: () => 'http://127.0.0.1:1234/api/session/cancel' })
+    },
+    filter() { return this }, first() { return this },
+    fill: async () => { actions.push([name, 'fill']) }, press: async () => { actions.push([name, 'press']) },
+    getAttribute: async key => key === 'data-row-key' ? 'session:cancelled' : 'true',
+  })
+  const tree = { ...control('tree'), locator: selector => selector.includes('data-row-key')
+    ? control(selector.includes('aria-selected') ? 'selected-row' : 'row') : control('group') }
+  const root = {
+    waitFor: async options => { actions.push(['root', 'waitFor', options]) },
+    getByRole: (role, options) => role === 'tree' ? tree : control(options.name === 'New session' ? 'new-session' : 'stop'),
+    getByText: () => control('response'),
+    locator: () => control('composer'),
+  }
+  page.goto = async () => ({ status: () => 200 })
+  page.locator = () => root
+  page.getByRole = (role, options) => role === 'textbox' && options.name === 'Choose workspace'
+    ? { count: async () => 0 } : { isVisible: async () => false }
+  return { page, actions }
+}
+test('create path uses synthetic browser actionability, visible controls, cancel and cleanup', async () => {
+  const sourceRoot = mkdtempSync(join(tmpdir(), 'b5-ui-synthetic-'))
+  try {
+    const web = join(sourceRoot, 'apps', 'web'); const playwright = join(web, 'node_modules', 'playwright')
+    mkdirSync(playwright, { recursive: true })
+    writeFileSync(join(web, 'package.json'), '{"private":true}', { mode: 0o600 })
+    writeFileSync(join(playwright, 'package.json'), '{"name":"playwright","type":"module","exports":"./index.mjs"}', { mode: 0o600 })
+    writeFileSync(join(playwright, 'index.mjs'), 'export const chromium = { launchPersistentContext: (...args) => globalThis.__b5SyntheticChromium.launchPersistentContext(...args) }\n', { mode: 0o600 })
+    const config = { sourceRoot, browserUserData: join(sourceRoot, 'profile'), browserPath: '/synthetic/chromium',
+      browserTemporary: join(sourceRoot, 'tmp'), workspaceDirectory: join(sourceRoot, 'workspace') }
+    const barriers = { cancelStarted: { promise: Promise.resolve() } }
+    for (const unusable of [null, 'new-session-hidden', 'new-session-disabled', 'composer-hidden', 'composer-disabled', 'stop-hidden', 'stop-disabled']) {
+      const { page, actions } = createPathPage({ unusable, delayedNewSession: unusable === null })
+      let closes = 0
+      globalThis.__b5SyntheticChromium = { launchPersistentContext: async () => ({ pages: () => [page], close: async () => { closes += 1 } }) }
+      const run = browserCreateCancel(config, { readyUrl: 'http://127.0.0.1:1234/' }, barriers, { sessionId: 'durable' })
+      if (unusable === null) {
+        const result = await run
+        assert.equal(result.cancelled, true)
+        assert.equal(result.sessionId, 'cancelled')
+        assert.deepEqual(result.durableInitial, { rendered: true, selected: true })
+        assert.ok(actions.some(([name, action]) => name === 'new-session' && action === 'click'))
+        assert.ok(actions.some(([name, action]) => name === 'composer' && action === 'fill'))
+        assert.ok(actions.some(([name, action]) => name === 'stop' && action === 'click'))
+      } else await assert.rejects(run, /hidden|unavailable|not usable/, unusable)
+      assert.equal(closes, 1)
+    }
+  } finally { delete globalThis.__b5SyntheticChromium; rmSync(sourceRoot, { recursive: true, force: true }) }
+})
 test('UI failure captures bounded passive metadata, root state, and rethrows identical primary', async () => {
-  const page = fakePage({ failure: 'wait', roots: 17, visible: false }); const lines = []
+  const page = fakePage({ failure: 'wait', roots: 17, visible: false, slots: 300, mountChildren: 300 }); const lines = []
   page.goto = async (url, options) => {
     page.calls.push(['goto', url, options])
     page.emit('response', { request: () => ({ resourceType: () => 'document' }), url: () => 'http://127.0.0.1:1234/?credential=POISON', status: () => 200 })
@@ -171,6 +310,9 @@ test('UI failure captures bounded passive metadata, root state, and rethrows ide
   assert.equal(record.request_failures[0].failure, 'connection')
   assert.equal(record.snapshot.root_attached_count, 16); assert.equal(record.snapshot.roots_truncated, true)
   assert.equal(record.snapshot.root_visible, false)
+  assert.equal(record.snapshot.any_slot_count, 256)
+  assert.equal(record.snapshot.mount_container_present, true)
+  assert.equal(record.snapshot.mount_container_child_element_count, 256)
   assert.doesNotMatch(lines[0], /POISON|credential|token=|ORIGINAL_TIMEOUT_PRIVATE/)
   assert.equal(page.listenerCount('response') + page.listenerCount('pageerror') + page.listenerCount('requestfailed'), 0)
   assert.equal(page.calls.filter(call => call[0] === 'goto').length, 1)

@@ -90,12 +90,15 @@ function browserObserver(page, readyUrl) {
 }
 async function uiSnapshot(page, readyUrl) {
   const snapshot = { ready_state: 'unknown', path: { category: 'unavailable' }, root_attached_count: null,
-    roots_truncated: false, root_visible: null, root_error_marker: null }
+    roots_truncated: false, root_visible: null, root_error_marker: null, any_slot_count: null,
+    mount_container_present: null, mount_container_child_element_count: null }
   const origin = new URL(readyUrl).origin
   let timer
   const work = (async () => {
     const dom = await page.evaluate(({ root, error }) => ({ readyState: document.readyState, pathname: location.href,
-      roots: document.querySelectorAll(root).length, rootError: document.querySelector(error) !== null }), { root: ROOT_SELECTOR, error: ERROR_SELECTOR })
+      roots: document.querySelectorAll(root).length, rootError: document.querySelector(error) !== null,
+      slots: document.querySelectorAll('[data-slot]').length, mount: document.querySelector('#root') !== null,
+      mountChildren: document.querySelector('#root')?.childElementCount ?? null }), { root: ROOT_SELECTOR, error: ERROR_SELECTOR })
     snapshot.ready_state = ['loading', 'interactive', 'complete'].includes(dom?.readyState) ? dom.readyState : 'unknown'
     snapshot.path = safePath(dom?.pathname, origin)
     if (Number.isSafeInteger(dom?.roots) && dom.roots >= 0) {
@@ -107,6 +110,9 @@ async function uiSnapshot(page, readyUrl) {
       } else snapshot.root_visible = false
     }
     if (typeof dom?.rootError === 'boolean') snapshot.root_error_marker = dom.rootError
+    if (Number.isSafeInteger(dom?.slots) && dom.slots >= 0) snapshot.any_slot_count = Math.min(dom.slots, 256)
+    if (typeof dom?.mount === 'boolean') snapshot.mount_container_present = dom.mount
+    if (Number.isSafeInteger(dom?.mountChildren) && dom.mountChildren >= 0) snapshot.mount_container_child_element_count = Math.min(dom.mountChildren, 256)
     return snapshot
   })()
   try { return await Promise.race([work, new Promise(resolve => { timer = setTimeout(() => resolve({ ...snapshot, observation_timeout: true }), 1000) })]) }
@@ -117,7 +123,7 @@ export async function waitForB5UiRoot(page, readyUrl, phase, writer = (fd, line)
   let navigation
   try {
     navigation = await page.goto(readyUrl, { waitUntil: 'load', timeout: 30_000 })
-    await page.locator(ROOT_SELECTOR).waitFor({ timeout: 20_000 })
+    await page.locator(ROOT_SELECTOR).waitFor({ state: 'attached', timeout: 20_000 })
   } catch (primary) {
     let snapshot
     try { snapshot = await uiSnapshot(page, readyUrl) } catch { snapshot = { unavailable: true } }
@@ -178,12 +184,15 @@ async function workspace(page, cwd) {
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
 }
 export async function openById(page, sessionId, expected) {
-  const tree = page.getByRole('tree', { name: 'Sessions', exact: true }); await tree.waitFor({ state: 'visible', timeout: 15_000 })
+  const root = page.locator(ROOT_SELECTOR)
+  const tree = root.getByRole('tree', { name: 'Sessions', exact: true }); await tree.waitFor({ state: 'visible', timeout: 15_000 })
   const group = tree.locator('[role="treeitem"][aria-expanded]').filter({ hasText: 'workspace' }).first(); await group.waitFor({ state: 'visible', timeout: 15_000 })
   if (await group.getAttribute('aria-expanded') !== 'true') await group.click()
   const row = tree.locator(`[data-row-key=${JSON.stringify(`session:${sessionId}`)}]`); await row.waitFor({ state: 'visible', timeout: 15_000 }); await row.click()
-  await page.getByText(expected, { exact: true }).first().waitFor({ state: 'visible', timeout: 15_000 })
-  return { rendered: true, selected: await row.getAttribute('aria-selected') === 'true' }
+  await root.getByText(expected, { exact: true }).first().waitFor({ state: 'visible', timeout: 15_000 })
+  const selected = await row.getAttribute('aria-selected') === 'true'
+  if (!selected) throw new Error('expected visible session row to be selected')
+  return { rendered: true, selected }
 }
 export async function browserCreateCancel(config, host, barriers, durable) {
   const engine = await chromium(config.sourceRoot); if (engine === undefined) throw new Error('pinned Chromium API unavailable')
@@ -197,10 +206,17 @@ export async function browserCreateCancel(config, host, barriers, durable) {
     const cont = page.getByRole('button', { name: 'Continue', exact: true }); if (await cont.isVisible().catch(() => false)) await cont.click()
     await workspace(page, config.workspaceDirectory)
     const durableInitial = await openById(page, durable.sessionId, 'FIRST_FINAL')
-    await page.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' }).click()
-    const input = page.locator('[data-composer-input][contenteditable="true"]').first(); await input.waitFor({ timeout: 20_000 }); await input.fill('B5 CANCEL UI'); await input.press('Enter')
-    const stop = page.getByRole('button', { name: 'Stop generating' }); await stop.waitFor({ timeout: 10_000 }); await timeout(barriers.cancelStarted.promise, 'UI cancel provider'); await stop.click()
-    await stop.waitFor({ state: 'detached', timeout: 15_000 }); const selected = page.getByRole('tree', { name: 'Sessions', exact: true }).locator('[role="treeitem"][aria-selected="true"][data-row-key^="session:"]').first()
+    const root = page.locator(ROOT_SELECTOR)
+    const newSession = root.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' })
+    // Playwright click supplies the original visible/enabled actionability wait.
+    await newSession.click()
+    const input = root.locator('[data-composer-input][contenteditable="true"]').first(); await input.waitFor({ state: 'visible', timeout: 20_000 })
+    if (!await input.isEnabled()) throw new Error('composer is not usable')
+    await input.fill('B5 CANCEL UI'); await input.press('Enter')
+    const stop = root.getByRole('button', { name: 'Stop generating' }); await stop.waitFor({ state: 'visible', timeout: 10_000 })
+    if (!await stop.isEnabled()) throw new Error('Stop control is not usable')
+    await timeout(barriers.cancelStarted.promise, 'UI cancel provider'); await stop.click()
+    await stop.waitFor({ state: 'detached', timeout: 15_000 }); const selected = root.getByRole('tree', { name: 'Sessions', exact: true }).locator('[role="treeitem"][aria-selected="true"][data-row-key^="session:"]').first()
     const sessionId = (await selected.getAttribute('data-row-key'))?.slice('session:'.length)
     return { apiRequests, pageErrors, durableInitial, sessionId, created: typeof sessionId === 'string', cancelled: apiRequests.includes('/api/session/cancel') }
   } catch (error) { failed = true; primary = error; throw error }

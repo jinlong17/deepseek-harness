@@ -50,6 +50,26 @@ function requestObservation(payload, ordinal) {
   const markers = ['B5 TOOL', 'B5 REJECT', 'B5 LATE'].filter(marker => serialized.includes(marker))
   if (markers.length === 0) return undefined
   const roles = messages.slice(0, 32).map(message => OBSERVED_ROLES.has(message?.role) ? message.role : 'unknown')
+  const last = messages.at(-1)
+  const finalUser = last?.role === 'user' ? last : null
+  const content = finalUser?.content
+  const finalContentShape = finalUser === null ? 'not-user' : typeof content === 'string' ? 'string'
+    : Array.isArray(content) ? 'array' : content === null ? 'null' : content === undefined ? 'absent' : 'other'
+  let currentText = typeof content === 'string' ? content : null
+  let currentTextState = currentText === null ? 'unknown' : 'string'
+  if (Array.isArray(content)) {
+    const textParts = content.every(part => part !== null && typeof part === 'object'
+      && part.type === 'text' && typeof part.text === 'string')
+    currentTextState = textParts ? 'text-parts' : 'mixed-or-malformed-parts'
+    if (textParts) currentText = content.map(part => part.text).join('')
+  }
+  const currentMarkers = currentText === null ? null : ['B5 TOOL', 'B5 REJECT', 'B5 LATE'].filter(marker => currentText.includes(marker))
+  const history = JSON.stringify(messages.slice(0, -1))
+  const historyMarkers = ['B5 TOOL', 'B5 REJECT', 'B5 LATE'].filter(marker => history.includes(marker))
+  const streamState = !Object.hasOwn(safe, 'stream') ? 'absent' : safe.stream === true ? 'true' : safe.stream === false ? 'false' : 'other'
+  // This source-decoded static literal is a diagnostic equality only, never an admission rule.
+  const suggestionPromptSha = '53e6d97a6587792612a74b051b81e7b5a2236496e8da25aafe6c7cf75086d8e2'
+  const sourcePatterns = currentText === null ? null : sha(currentText) === suggestionPromptSha ? ['prompt-suggestion-pattern'] : []
   const tools = safe.tools
   const toolsState = !Object.hasOwn(safe, 'tools') ? 'absent' : tools === null ? 'null' : Array.isArray(tools) ? 'array' : 'other'
   const signatures = []
@@ -58,6 +78,10 @@ function requestObservation(payload, ordinal) {
   if (serialized.includes('Generate a concise, sentence-case title (3-7 words)') && serialized.includes('Conversation so far:')) signatures.push('session-title')
   return { schema: 'g9-b5-request-observation/v1', ordinal, markers, canonical_parsed_payload_sha256: sha(normalized),
     message_count: messages.length, roles, roles_truncated: messages.length > roles.length, signatures: signatures.length ? signatures : ['unknown'],
+    final_role: last === undefined ? 'absent' : OBSERVED_ROLES.has(last?.role) ? last.role : 'unknown',
+    final_user_content_shape: finalContentShape, current_text_state: currentTextState,
+    current_final_user_markers: currentMarkers, history_markers: historyMarkers,
+    source_pattern_matches: sourcePatterns, stream_state: streamState,
     tools_state: toolsState, tools_count: Array.isArray(tools) ? tools.length : null,
     shell_present: Array.isArray(tools) && tools.some(item => item?.function?.name === 'run_shell_command') }
 }
